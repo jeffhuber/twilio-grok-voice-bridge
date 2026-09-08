@@ -10,7 +10,7 @@ hang up voice calls through a small Node bridge.
 
 ## Package
 
-- Public repo (placeholder): https://github.com/jeffhuber/twilio-grok-voice-bridge
+- Public repo: https://github.com/jeffhuber/twilio-grok-voice-bridge
 - Local scrubbed package (if present): /workspace/twilio-grok-voice-bridge
 
 Read README.md and docs/architecture.md in that package before improvising.
@@ -43,4 +43,4 @@ Read README.md and docs/architecture.md in that package before improvising.
 ## Hygiene
 
 - No secrets in git; scrub before publishing.
-- Public repo URL is TBD until published (jeffhuber/twilio-grok-voice-bridge placeholder).
+- Public repo: https://github.com/jeffhuber/twilio-grok-voice-bridge

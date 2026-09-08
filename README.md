@@ -1,5 +1,8 @@
 # twilio-grok-voice-bridge
 
+**Repo:** https://github.com/jeffhuber/twilio-grok-voice-bridge
+
+
 Wire **Twilio outbound voice** to **xAI Grok Voice** (realtime) over Media Streams.
 
 ```
