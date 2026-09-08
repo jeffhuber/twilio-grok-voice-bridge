@@ -1,0 +1,22 @@
+{
+  "name": "twilio-grok-voice-bridge",
+  "version": "1.0.0",
+  "description": "Twilio Media Streams to xAI Grok Voice realtime bridge for outbound voice calls",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "tunnel": "bash scripts/tunnel.sh"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "twilio": "^5.4.5",
+    "ws": "^8.18.1"
+  },
+  "private": false,
+  "license": "MIT"
+}
