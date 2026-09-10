@@ -2,11 +2,18 @@
 
 Set BRIDGE=http://127.0.0.1:3000 (or your public base URL).
 
+**Authentication:** If `BRIDGE_API_KEY` is set, include either:
+- `Authorization: Bearer <BRIDGE_API_KEY>`, or
+- `X-Bridge-Key: <BRIDGE_API_KEY>`
+
+Examples below show the Bearer header.
+
 ## POST /call
 
 ```
 POST {BRIDGE}/call
 Content-Type: application/json
+Authorization: Bearer <BRIDGE_API_KEY>
 
 {
   "to": "+15551234567",
@@ -21,6 +28,7 @@ Content-Type: application/json
 ```
 POST {BRIDGE}/steer
 Content-Type: application/json
+Authorization: Bearer <BRIDGE_API_KEY>
 
 { "callSid": "CAxxxx", "text": "Ask for booth seating instead of patio." }
 ```
@@ -30,6 +38,7 @@ Content-Type: application/json
 ```
 POST {BRIDGE}/hangup
 Content-Type: application/json
+Authorization: Bearer <BRIDGE_API_KEY>
 
 { "callSid": "CAxxxx" }
 ```
@@ -38,6 +47,7 @@ Content-Type: application/json
 
 ```
 GET {BRIDGE}/transcript?callSid=CAxxxx
+Authorization: Bearer <BRIDGE_API_KEY>
 ```
 
 ## POST /voice
@@ -45,6 +55,7 @@ GET {BRIDGE}/transcript?callSid=CAxxxx
 ```
 POST {BRIDGE}/voice
 Content-Type: application/json
+Authorization: Bearer <BRIDGE_API_KEY>
 
 { "callSid": "CAxxxx", "voice": "Eve" }
 ```

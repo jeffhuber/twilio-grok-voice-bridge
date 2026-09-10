@@ -73,6 +73,40 @@ Body: `{ "callSid": "...", "voice": "ara" }` — mid-call TTS voice switch.
 
 Liveness + config summary (no secrets).
 
+## Security
+
+**WARNING:** Without authentication, anyone who can reach this bridge can place Twilio calls and spend your account.
+
+### BRIDGE_API_KEY (CRITICAL)
+
+Set `BRIDGE_API_KEY` to a strong random secret to protect operator control-plane routes:
+- POST /call
+- POST /steer
+- POST /hangup
+- POST /voice
+- GET /transcript
+
+The bridge accepts either header:
+- `Authorization: Bearer <BRIDGE_API_KEY>`
+- `X-Bridge-Key: <BRIDGE_API_KEY>`
+
+Twilio-facing webhook and Media Streams paths remain unauthenticated (Twilio cannot send custom API keys).
+
+### Auth policy
+
+- **BRIDGE_API_KEY set:** operator routes require the key (401 JSON `{ error: "unauthorized" }` on miss/mismatch).
+- **REQUIRE_BRIDGE_AUTH=1 + no key:** server exits on startup.
+- **No key, no REQUIRE flag:** server starts with a loud warning; operator routes are OPEN (dev/localhost only).
+
+### Production deployment
+
+For public hosts, **always** use one of:
+1. Set `BRIDGE_API_KEY` to a strong secret
+2. Put the server behind Cloudflare Access or equivalent
+3. Bind to localhost only and access via tunnel
+
+**Do NOT** deploy this bridge publicly without authentication.
+
 ## Environment table
 
 | Variable | Purpose |
@@ -84,6 +118,8 @@ Liveness + config summary (no secrets).
 | XAI_VOICE | Default TTS voice id (example: ara) |
 | PORT | HTTP listen port (default 3000) |
 | PUBLIC_HOST | Public hostname for media-stream WSS (no scheme) |
+| BRIDGE_API_KEY | **CRITICAL:** Shared secret for operator routes (Bearer or X-Bridge-Key) |
+| REQUIRE_BRIDGE_AUTH | Set to `1` to exit on startup if BRIDGE_API_KEY is missing |
 | CONTACT_FULL_NAME | Optional; restaurant-book style |
 | CONTACT_MOBILE | Optional callback number for restaurant-book |
 | BARGE_IN_CONFIRM_MS | Barge-in confirm window ms (default 280) |
@@ -107,7 +143,8 @@ Optional softContinue true on POST /call enables post-playback soft-continue.
 
 ## Security notes
 
-- Keep Twilio tokens, xAI keys, and real phone numbers out of git.
+- **Set BRIDGE_API_KEY** to protect operator routes or restrict access via Cloudflare Access / localhost-only binding.
+- Keep Twilio tokens, xAI keys, BRIDGE_API_KEY, and real phone numbers out of git.
 - Twilio needs a public WSS URL for Media Streams.
 - Dual-channel recording is enabled on call create.
 
