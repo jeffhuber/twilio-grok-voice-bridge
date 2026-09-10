@@ -8,6 +8,7 @@
 
 require('dotenv').config({ override: true });
 
+const crypto = require('crypto');
 const http = require('http');
 const express = require('express');
 const WebSocket = require('ws');
@@ -19,6 +20,8 @@ const TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID;
 const TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN;
 const TWILIO_FROM_NUMBER = process.env.TWILIO_FROM_NUMBER;
 const XAI_API_KEY = process.env.XAI_API_KEY;
+const BRIDGE_API_KEY = process.env.BRIDGE_API_KEY;
+const REQUIRE_BRIDGE_AUTH = process.env.REQUIRE_BRIDGE_AUTH === '1';
 
 /** Optional JSON map of alias → voice id, e.g. {"my-voice":"abc123","clone":"xyz"} */
 function loadVoiceAliases() {
@@ -271,6 +274,18 @@ if (!TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN || !TWILIO_FROM_NUMBER) {
 }
 if (!XAI_API_KEY) {
   console.warn('[warn] XAI_API_KEY missing — media-stream bridge will fail until set');
+}
+if (REQUIRE_BRIDGE_AUTH && !BRIDGE_API_KEY) {
+  console.error('[error] REQUIRE_BRIDGE_AUTH=1 but BRIDGE_API_KEY is not set — server will refuse operator routes');
+  process.exit(1);
+}
+if (!BRIDGE_API_KEY) {
+  console.warn('');
+  console.warn('[SECURITY WARNING] BRIDGE_API_KEY is not set!');
+  console.warn('[SECURITY WARNING] Operator control-plane routes (/call, /steer, /hangup, /voice, /transcript) are UNPROTECTED.');
+  console.warn('[SECURITY WARNING] Anyone who can reach this host can spend your Twilio account.');
+  console.warn('[SECURITY WARNING] Set BRIDGE_API_KEY or put this server behind Cloudflare Access / localhost-only.');
+  console.warn('');
 }
 
 const twilioClient =
@@ -1037,6 +1052,42 @@ const app = express();
 app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: true }));
 
+function requireBridgeAuth(req, res, next) {
+  if (!BRIDGE_API_KEY) {
+    if (REQUIRE_BRIDGE_AUTH) {
+      return res.status(401).json({ error: 'unauthorized' });
+    }
+    return next();
+  }
+
+  const authHeader = req.headers.authorization || '';
+  const xBridgeKey = req.headers['x-bridge-key'] || '';
+
+  let providedKey = null;
+  if (authHeader.startsWith('Bearer ')) {
+    providedKey = authHeader.slice(7);
+  } else if (xBridgeKey) {
+    providedKey = xBridgeKey;
+  }
+
+  if (!providedKey) {
+    return res.status(401).json({ error: 'unauthorized' });
+  }
+
+  const keyBuf = Buffer.from(BRIDGE_API_KEY, 'utf8');
+  const providedBuf = Buffer.from(providedKey, 'utf8');
+
+  if (keyBuf.length !== providedBuf.length) {
+    return res.status(401).json({ error: 'unauthorized' });
+  }
+
+  if (!crypto.timingSafeEqual(keyBuf, providedBuf)) {
+    return res.status(401).json({ error: 'unauthorized' });
+  }
+
+  next();
+}
+
 app.get('/health', (_req, res) => {
   let active = 0;
   for (const s of sessionsByCallSid.values()) {
@@ -1055,10 +1106,11 @@ app.get('/health', (_req, res) => {
     voiceSwitch: true,
     styles: Object.keys(STYLE_PROFILES),
     contactConfigured: Boolean(getContact().fullName || getContact().mobile),
+    authRequired: Boolean(BRIDGE_API_KEY),
   });
 });
 
-app.post('/call', async (req, res) => {
+app.post('/call', requireBridgeAuth, async (req, res) => {
   try {
     const { to, goal, context, voice, style, softContinue } = req.body || {};
     if (!to || !goal) {
@@ -1124,7 +1176,7 @@ app.post('/call', async (req, res) => {
  * Inject operator coaching without announcing it to the callee.
  * Updates session instructions mid-call (silent to the far end).
  */
-app.post('/steer', (req, res) => {
+app.post('/steer', requireBridgeAuth, (req, res) => {
   const { callSid, text } = req.body || {};
   if (!text) return res.status(400).json({ error: 'text is required' });
   const session = getActiveSession(callSid);
@@ -1156,7 +1208,7 @@ app.post('/steer', (req, res) => {
  * Mid-call TTS voice switch.
  * Body: { callSid?, voice: "<xAI voice id or alias>", announce? }
  */
-app.post('/voice', (req, res) => {
+app.post('/voice', requireBridgeAuth, (req, res) => {
   const { callSid, voice, announce } = req.body || {};
   if (!voice) return res.status(400).json({ error: 'voice is required' });
   const session = getActiveSession(callSid);
@@ -1176,7 +1228,7 @@ app.post('/voice', (req, res) => {
   });
 });
 
-app.get('/transcript', (req, res) => {
+app.get('/transcript', requireBridgeAuth, (req, res) => {
   const callSid = req.query.callSid;
   const session = getActiveSession(callSid);
   if (!session) {
@@ -1197,7 +1249,7 @@ app.get('/transcript', (req, res) => {
  * Hangup gate: only end the Twilio leg after explicit operator approval.
  * Voice model may set hangupRequested; we never auto-complete the call.
  */
-app.post('/hangup', async (req, res) => {
+app.post('/hangup', requireBridgeAuth, async (req, res) => {
   const { callSid, approve } = req.body || {};
   const session = getActiveSession(callSid);
   if (!session) return res.status(404).json({ error: 'no active call' });
