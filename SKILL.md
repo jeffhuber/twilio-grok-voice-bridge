@@ -24,6 +24,7 @@ Read README.md and docs/architecture.md in that package before improvising.
    TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM_NUMBER, XAI_API_KEY,
    optional XAI_VOICE, CONTACT_FULL_NAME, CONTACT_MOBILE, BARGE_IN_CONFIRM_MS,
    SOFT_CONTINUE_MS, VOICE_ALIASES (JSON).
+   **CRITICAL:** Set BRIDGE_API_KEY for production to protect operator routes.
 
 3. Set PUBLIC_HOST to a hostname Twilio can reach over WSS.
 
