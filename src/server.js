@@ -299,6 +299,26 @@ const twilioClient =
 const sessionsByCallSid = new Map();
 /** Pending metadata keyed before stream start (callSid known after create) */
 const pendingByCallSid = new Map();
+/** @type {Map<string, {session: CallSession, createdAt: number}>} bridgeToken -> {session, timestamp} */
+const pendingByToken = new Map();
+
+const BRIDGE_TOKEN_TTL_MS = Number(process.env.BRIDGE_TOKEN_TTL_MS || 120000); // 2 minutes
+
+function generateBridgeToken() {
+  return crypto.randomBytes(32).toString('base64url');
+}
+
+function cleanupExpiredTokens() {
+  const now = Date.now();
+  for (const [token, entry] of pendingByToken.entries()) {
+    if (now - entry.createdAt > BRIDGE_TOKEN_TTL_MS) {
+      pendingByToken.delete(token);
+      console.log(`[token] expired token=${token.slice(0, 12)}...`);
+    }
+  }
+}
+
+setInterval(cleanupExpiredTokens, 60000);
 
 /**
  * @typedef {object} TranscriptLine
@@ -950,7 +970,6 @@ function handleTwilioMessage(session, raw) {
       session.streamSid = msg.start?.streamSid || msg.streamSid;
       const custom = msg.start?.customParameters || {};
       if (custom.goal && !session.goal) session.goal = custom.goal;
-      // TwiML custom params are capped (~500 chars) — never clobber a longer pending context
       if (custom.context && (!session.context || custom.context.length > session.context.length)) {
         session.context = custom.context;
       }
@@ -965,7 +984,6 @@ function handleTwilioMessage(session, raw) {
       console.log(
         `[twilio] start streamSid=${session.streamSid} callSid=${session.callSid} style=${session.style || 'support'} goal=${(session.goal || '').slice(0, 60)}`
       );
-      openGrokSession(session);
       break;
     }
 
@@ -1053,11 +1071,14 @@ function cleanupSession(session, { hangupTwilio } = { hangupTwilio: false }) {
   }
 }
 
-function buildConnectTwiml({ goal, context, voice, style, softContinue }) {
+function buildConnectTwiml({ goal, context, voice, style, softContinue, bridgeToken }) {
   if (!PUBLIC_HOST) {
     throw new Error('PUBLIC_HOST is not set (hostname only, no scheme)');
   }
-  const streamUrl = `wss://${PUBLIC_HOST}/media-stream`;
+  if (!bridgeToken) {
+    throw new Error('bridgeToken is required');
+  }
+  const streamUrl = `wss://${PUBLIC_HOST}/media-stream?bridgeToken=${encodeURIComponent(bridgeToken)}`;
   const vr = new twilio.twiml.VoiceResponse();
   const connect = vr.connect();
   const stream = connect.stream({ url: streamUrl });
@@ -1067,6 +1088,7 @@ function buildConnectTwiml({ goal, context, voice, style, softContinue }) {
   if (voice) stream.parameter({ name: 'voice', value: String(voice).slice(0, 100) });
   if (style) stream.parameter({ name: 'style', value: String(style).slice(0, 40) });
   if (softContinue) stream.parameter({ name: 'softContinue', value: 'true' });
+  stream.parameter({ name: 'bridgeToken', value: bridgeToken });
   return vr.toString();
 }
 
@@ -1149,12 +1171,16 @@ app.post('/call', requireBridgeAuth, async (req, res) => {
     const resolvedVoice = resolveVoiceId(voice || XAI_VOICE);
     const resolvedStyle = resolveStyle({ style });
     const wantSoft = Boolean(softContinue);
+    
+    const bridgeToken = generateBridgeToken();
+    
     const twiml = buildConnectTwiml({
       goal,
       context,
       voice: resolvedVoice,
       style: resolvedStyle,
       softContinue: wantSoft,
+      bridgeToken,
     });
 
     const call = await twilioClient.calls.create({
@@ -1174,9 +1200,11 @@ app.post('/call', requireBridgeAuth, async (req, res) => {
       to,
       softContinue: wantSoft,
     });
+    session.bridgeToken = bridgeToken;
     pendingByCallSid.set(call.sid, session);
+    pendingByToken.set(bridgeToken, { session, createdAt: Date.now() });
 
-    console.log(`[call] placed sid=${call.sid} to=${to} style=${resolvedStyle}`);
+    console.log(`[call] placed sid=${call.sid} to=${to} style=${resolvedStyle} token=${bridgeToken.slice(0, 12)}...`);
     res.json({
       ok: true,
       callSid: call.sid,
@@ -1303,71 +1331,37 @@ app.post('/hangup', requireBridgeAuth, async (req, res) => {
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ noServer: true });
 
-/**
- * Validate Twilio request signature.
- * @param {string} authToken - TWILIO_AUTH_TOKEN
- * @param {string} signature - X-Twilio-Signature header
- * @param {string} url - Full URL including protocol, host, path, and query
- * @param {object} params - Query parameters or POST body
- * @returns {boolean}
- */
-function validateTwilioSignature(authToken, signature, url, params) {
-  if (!authToken || !signature) return false;
-  const data = Object.keys(params)
-    .sort()
-    .reduce((acc, key) => acc + key + params[key], url);
-  const expectedSignature = crypto
-    .createHmac('sha1', authToken)
-    .update(Buffer.from(data, 'utf-8'))
-    .digest('base64');
-  return crypto.timingSafeEqual(
-    Buffer.from(signature),
-    Buffer.from(expectedSignature)
-  );
-}
-
 server.on('upgrade', (req, socket, head) => {
   const path = (req.url || '').split('?')[0];
   if (path === '/media-stream') {
-    if (!TWILIO_AUTH_TOKEN) {
-      console.error('[media-stream] TWILIO_AUTH_TOKEN not set — cannot validate signature');
-      socket.write('HTTP/1.1 500 Internal Server Error\r\n\r\n');
-      socket.destroy();
-      return;
-    }
-
     const url = new URL(req.url || '', `wss://${PUBLIC_HOST || req.headers.host}`);
-    const signature = req.headers['x-twilio-signature'] || '';
-    const params = {};
-    url.searchParams.forEach((value, key) => {
-      params[key] = value;
-    });
+    const bridgeToken = url.searchParams.get('bridgeToken');
 
-    const fullUrl = `https://${PUBLIC_HOST || req.headers.host}${req.url}`;
-    if (!validateTwilioSignature(TWILIO_AUTH_TOKEN, signature, fullUrl, params)) {
-      console.error('[media-stream] Invalid Twilio signature');
-      socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
-      socket.destroy();
-      return;
-    }
-
-    const callSid = params.CallSid || params.callSid;
-    if (!callSid) {
-      console.error('[media-stream] No CallSid in request');
+    if (!bridgeToken) {
+      console.error('[media-stream] No bridgeToken in request');
       socket.write('HTTP/1.1 400 Bad Request\r\n\r\n');
       socket.destroy();
       return;
     }
 
-    const hasSession = sessionsByCallSid.has(callSid) || pendingByCallSid.has(callSid);
-    if (!hasSession) {
-      console.error(`[media-stream] CallSid ${callSid} not bound to a pending/active call`);
+    const entry = pendingByToken.get(bridgeToken);
+    if (!entry) {
+      console.error(`[media-stream] Unknown or expired bridgeToken=${bridgeToken.slice(0, 12)}...`);
       socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
       socket.destroy();
       return;
     }
 
-    console.log(`[media-stream] Validated Twilio signature for CallSid=${callSid}`);
+    const now = Date.now();
+    if (now - entry.createdAt > BRIDGE_TOKEN_TTL_MS) {
+      pendingByToken.delete(bridgeToken);
+      console.error(`[media-stream] Expired bridgeToken=${bridgeToken.slice(0, 12)}...`);
+      socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
+      socket.destroy();
+      return;
+    }
+
+    console.log(`[media-stream] Validated bridgeToken=${bridgeToken.slice(0, 12)}...`);
 
     wss.handleUpgrade(req, socket, head, (ws) => {
       wss.emit('connection', ws, req);
@@ -1378,10 +1372,27 @@ server.on('upgrade', (req, socket, head) => {
 });
 
 wss.on('connection', (ws, req) => {
-  console.log('[twilio] media-stream websocket upgrade');
+  console.log('[twilio] media-stream websocket connected');
+
+  const url = new URL(req.url || '', `wss://${PUBLIC_HOST || req.headers.host}`);
+  const bridgeToken = url.searchParams.get('bridgeToken');
+
+  if (!bridgeToken) {
+    console.error('[twilio] No bridgeToken on connection');
+    ws.close(1008, 'Missing bridgeToken');
+    return;
+  }
+
+  const entry = pendingByToken.get(bridgeToken);
+  if (!entry) {
+    console.error(`[twilio] Unknown bridgeToken=${bridgeToken.slice(0, 12)}...`);
+    ws.close(1008, 'Invalid bridgeToken');
+    return;
+  }
 
   /** @type {CallSession|null} */
-  let session = null;
+  let session = entry.session;
+  let boundToCallSid = false;
 
   ws.on('message', (data) => {
     let msg;
@@ -1393,76 +1404,75 @@ wss.on('connection', (ws, req) => {
 
     if (msg.event === 'start') {
       const resolvedSid = msg.start?.callSid;
-      session =
-        (resolvedSid && sessionsByCallSid.get(resolvedSid)) ||
-        (resolvedSid && pendingByCallSid.get(resolvedSid)) ||
-        null;
+      const custom = msg.start?.customParameters || {};
+      const tokenFromCustom = custom.bridgeToken;
 
-      if (!session && resolvedSid) {
-        const custom = msg.start?.customParameters || {};
-        session = createSession({
-          callSid: resolvedSid,
-          goal: custom.goal || 'Assist the customer',
-          context: custom.context || '',
-          voice: custom.voice || XAI_VOICE,
-          style: custom.style,
-          softContinue: custom.softContinue === 'true' || custom.softContinue === '1',
-        });
+      if (!resolvedSid) {
+        console.error('[twilio] start event missing callSid');
+        ws.close(1008, 'Missing CallSid');
+        return;
       }
-      if (!session) {
-        // Create orphan session; callSid may arrive in start
-        session = createSession({
-          callSid: resolvedSid || `unknown_${Date.now()}`,
-          goal: 'Assist the customer',
-          context: '',
-          voice: XAI_VOICE,
-        });
-      }
-      session.twilioWs = ws;
-    }
 
-    if (!session) {
-      // connected event may arrive before start — stash ws on a temp holder
-      if (msg.event === 'connected') {
-        ws._awaitingStart = true;
+      if (tokenFromCustom && tokenFromCustom !== bridgeToken) {
+        console.error(`[twilio] bridgeToken mismatch: URL=${bridgeToken.slice(0, 12)}... custom=${tokenFromCustom.slice(0, 12)}...`);
+        ws.close(1008, 'Token mismatch');
+        return;
       }
-      // Buffer until start: attach ephemeral
-      if (!ws._orphanSession) {
-        ws._orphanSession = createSession({
-          callSid: `pending_${Date.now()}`,
-          goal: 'Assist the customer',
-          context: '',
-          voice: XAI_VOICE,
-        });
-        ws._orphanSession.twilioWs = ws;
-      }
-      session = ws._orphanSession;
-    }
 
-    // Rebind orphan to real callSid on start
-    if (msg.event === 'start' && session) {
-      const realSid = msg.start?.callSid;
-      if (realSid && session.callSid !== realSid) {
+      const existingSession = sessionsByCallSid.get(resolvedSid) || pendingByCallSid.get(resolvedSid);
+      if (existingSession && existingSession !== session) {
+        session.goal = existingSession.goal || session.goal;
+        session.context = existingSession.context || session.context;
+        session.voice = existingSession.voice || session.voice;
+        session.style = existingSession.style || session.style;
+        session.to = existingSession.to || session.to;
+        session.softContinue = existingSession.softContinue ?? session.softContinue;
+        session.vadThreshold = existingSession.vadThreshold ?? session.vadThreshold;
+        session.vadSilenceMs = existingSession.vadSilenceMs ?? session.vadSilenceMs;
+        session.instructions =
+          existingSession.instructions ||
+          buildInstructions(session.goal, session.context, session.style);
+      }
+
+      if (session.callSid !== resolvedSid) {
         sessionsByCallSid.delete(session.callSid);
-        session.callSid = realSid;
-        sessionsByCallSid.set(realSid, session);
-        const pending = pendingByCallSid.get(realSid);
-        if (pending && pending !== session) {
-          session.goal = pending.goal || session.goal;
-          session.context = pending.context || session.context;
-          session.voice = pending.voice || session.voice;
-          session.style = pending.style || session.style;
-          session.to = pending.to || session.to;
-          session.softContinue = pending.softContinue ?? session.softContinue;
-          session.vadThreshold = pending.vadThreshold ?? session.vadThreshold;
-          session.vadSilenceMs = pending.vadSilenceMs ?? session.vadSilenceMs;
-          session.instructions =
-            pending.instructions ||
-            buildInstructions(session.goal, session.context, session.style);
-          pendingByCallSid.delete(realSid);
-        }
+        session.callSid = resolvedSid;
+        sessionsByCallSid.set(resolvedSid, session);
       }
+
+      pendingByCallSid.delete(resolvedSid);
+      pendingByToken.delete(bridgeToken);
+
       session.twilioWs = ws;
+      session.streamSid = msg.start?.streamSid || msg.streamSid;
+
+      if (custom.goal && (!session.goal || session.goal === 'Assist the customer')) {
+        session.goal = custom.goal;
+      }
+      if (custom.context && (!session.context || custom.context.length > session.context.length)) {
+        session.context = custom.context;
+      }
+      if (custom.voice) session.voice = resolveVoiceId(custom.voice);
+      if (custom.style) session.style = normalizeStyle(custom.style);
+      if (custom.softContinue === 'true' || custom.softContinue === '1') {
+        session.softContinue = true;
+      }
+      session.vadThreshold = session.softContinue ? VAD_SOFT_THRESHOLD : VAD_THRESHOLD;
+      session.vadSilenceMs = session.softContinue ? VAD_SOFT_SILENCE_MS : VAD_SILENCE_MS;
+      session.instructions = buildInstructions(session.goal, session.context, session.style);
+
+      boundToCallSid = true;
+      console.log(
+        `[twilio] bound token=${bridgeToken.slice(0, 12)}... to callSid=${resolvedSid} streamSid=${session.streamSid} style=${session.style || 'support'}`
+      );
+
+      openGrokSession(session);
+      return;
+    }
+
+    if (!boundToCallSid) {
+      console.warn(`[twilio] Received ${msg.event} before callSid binding — buffering not supported`);
+      return;
     }
 
     handleTwilioMessage(session, data);
@@ -1480,6 +1490,9 @@ wss.on('connection', (ws, req) => {
         }
         session.grokWs = null;
       }
+    }
+    if (!boundToCallSid && bridgeToken) {
+      pendingByToken.delete(bridgeToken);
     }
   });
 
