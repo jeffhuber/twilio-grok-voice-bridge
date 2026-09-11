@@ -22,6 +22,8 @@ const TWILIO_FROM_NUMBER = process.env.TWILIO_FROM_NUMBER;
 const XAI_API_KEY = process.env.XAI_API_KEY;
 const BRIDGE_API_KEY = process.env.BRIDGE_API_KEY;
 const REQUIRE_BRIDGE_AUTH = process.env.REQUIRE_BRIDGE_AUTH === '1';
+const ENABLE_RECORDING = process.env.ENABLE_RECORDING === '1';
+const SKIP_AI_DISCLOSURE = process.env.SKIP_AI_DISCLOSURE === '1';
 
 /** Optional JSON map of alias → voice id, e.g. {"my-voice":"abc123","clone":"xyz"} */
 function loadVoiceAliases() {
@@ -348,10 +350,26 @@ function resolveStyle({ style }) {
   return 'support';
 }
 
+function buildAiDisclosure() {
+  if (SKIP_AI_DISCLOSURE) {
+    return '';
+  }
+  return [
+    '',
+    '## AI disclosure (CRITICAL — legal requirement in many jurisdictions)',
+    'At the BEGINNING of the call, after greeting, disclose that this is an AI-powered call.',
+    'Example: "Hi, this is an AI assistant calling on behalf of [name/purpose]. Is now a good time?"',
+    'Keep it brief, natural, and move forward — do not over-explain or apologize.',
+    'If they ask if you are a robot or AI, confirm clearly and politely.',
+    'NEVER lie about being human. NEVER claim to be a person when asked directly.',
+  ].join('\n');
+}
+
 function buildInstructions(goal, context, style) {
   const restaurant = isRestaurantBook(style);
   const custom = isCustomStyle(style);
   const ctx = context ? `\n\nAdditional context:\n${context}` : '';
+  const disclosure = buildAiDisclosure();
 
   if (restaurant) {
     return [
@@ -362,8 +380,9 @@ function buildInstructions(goal, context, style) {
       buildRestaurantBookCoaching(),
       '',
       UNIVERSAL_SPEECH_RULES,
+      disclosure,
       '',
-      'Never mention that you are an AI, that you are being coached, or that an operator is listening.',
+      'Never mention that you are being coached or that an operator is listening.',
       '',
       'When the reservation is confirmed OR clearly impossible,',
       'confirm the key details briefly, thank them, say goodbye, then include the exact token [[HANGUP_REQUESTED]]',
@@ -380,11 +399,13 @@ function buildInstructions(goal, context, style) {
       '',
       'Be concise, natural, and patient — especially with IVR menus and hold music.',
       'If you use delivery tags like [pause], they are silent cues only — never speak the word "pause" or read tags aloud.',
-      'Never mention that you are an AI, that you are being coached, or that an operator is listening.',
       'Do not invent account details, emails, or phone numbers; ask clarifying questions when needed.',
       'If contact info is required and present in context/goal/env, use only that — never fabricate.',
       '',
       UNIVERSAL_SPEECH_RULES,
+      disclosure,
+      '',
+      'Never mention that you are being coached or that an operator is listening.',
       '',
       'When the goal succeeds OR the call is a clear dead-end (wrong number, closed permanently, hostile hangup),',
       'say a brief polite closing if appropriate, then include the exact token [[HANGUP_REQUESTED]]',
@@ -406,11 +427,13 @@ function buildInstructions(goal, context, style) {
     'Be concise, natural, and patient — especially with IVR menus and hold music.',
     'If you use delivery tags like [pause], they are silent cues only — never speak the word "pause" or read tags aloud.',
     'Navigate phone trees carefully; use DTMF by speaking the digits you intend only if the bridge relays them; prefer waiting for human agents.',
-    'Never mention that you are an AI, that you are being coached, or that an operator is listening.',
     'Do not invent account details, emails, or phone numbers; ask clarifying questions when needed.',
     'If contact info is required and present in context/goal/env, use only that — never fabricate.',
     '',
     UNIVERSAL_SPEECH_RULES,
+    disclosure,
+    '',
+    'Never mention that you are being coached or that an operator is listening.',
     '',
     'When the errand succeeds OR the call is a clear dead-end (wrong number, closed permanently, hostile hangup),',
     'say a brief polite closing if appropriate, then include the exact token [[HANGUP_REQUESTED]]',
@@ -1138,8 +1161,8 @@ app.post('/call', requireBridgeAuth, async (req, res) => {
       to,
       from: TWILIO_FROM_NUMBER,
       twiml,
-      record: true,
-      recordingChannels: 'dual',
+      record: ENABLE_RECORDING,
+      recordingChannels: ENABLE_RECORDING ? 'dual' : undefined,
     });
 
     const session = createSession({
@@ -1230,9 +1253,12 @@ app.post('/voice', requireBridgeAuth, (req, res) => {
 
 app.get('/transcript', requireBridgeAuth, (req, res) => {
   const callSid = req.query.callSid;
-  const session = getActiveSession(callSid);
+  if (!callSid) {
+    return res.status(400).json({ error: 'callSid query parameter is required' });
+  }
+  const session = sessionsByCallSid.get(callSid);
   if (!session) {
-    return res.json({ callSid: null, lines: [], hangupRequested: false });
+    return res.status(404).json({ error: 'call not found' });
   }
   res.json({
     callSid: session.callSid,
@@ -1277,9 +1303,72 @@ app.post('/hangup', requireBridgeAuth, async (req, res) => {
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ noServer: true });
 
+/**
+ * Validate Twilio request signature.
+ * @param {string} authToken - TWILIO_AUTH_TOKEN
+ * @param {string} signature - X-Twilio-Signature header
+ * @param {string} url - Full URL including protocol, host, path, and query
+ * @param {object} params - Query parameters or POST body
+ * @returns {boolean}
+ */
+function validateTwilioSignature(authToken, signature, url, params) {
+  if (!authToken || !signature) return false;
+  const data = Object.keys(params)
+    .sort()
+    .reduce((acc, key) => acc + key + params[key], url);
+  const expectedSignature = crypto
+    .createHmac('sha1', authToken)
+    .update(Buffer.from(data, 'utf-8'))
+    .digest('base64');
+  return crypto.timingSafeEqual(
+    Buffer.from(signature),
+    Buffer.from(expectedSignature)
+  );
+}
+
 server.on('upgrade', (req, socket, head) => {
   const path = (req.url || '').split('?')[0];
   if (path === '/media-stream') {
+    if (!TWILIO_AUTH_TOKEN) {
+      console.error('[media-stream] TWILIO_AUTH_TOKEN not set — cannot validate signature');
+      socket.write('HTTP/1.1 500 Internal Server Error\r\n\r\n');
+      socket.destroy();
+      return;
+    }
+
+    const url = new URL(req.url || '', `wss://${PUBLIC_HOST || req.headers.host}`);
+    const signature = req.headers['x-twilio-signature'] || '';
+    const params = {};
+    url.searchParams.forEach((value, key) => {
+      params[key] = value;
+    });
+
+    const fullUrl = `https://${PUBLIC_HOST || req.headers.host}${req.url}`;
+    if (!validateTwilioSignature(TWILIO_AUTH_TOKEN, signature, fullUrl, params)) {
+      console.error('[media-stream] Invalid Twilio signature');
+      socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
+      socket.destroy();
+      return;
+    }
+
+    const callSid = params.CallSid || params.callSid;
+    if (!callSid) {
+      console.error('[media-stream] No CallSid in request');
+      socket.write('HTTP/1.1 400 Bad Request\r\n\r\n');
+      socket.destroy();
+      return;
+    }
+
+    const hasSession = sessionsByCallSid.has(callSid) || pendingByCallSid.has(callSid);
+    if (!hasSession) {
+      console.error(`[media-stream] CallSid ${callSid} not bound to a pending/active call`);
+      socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
+      socket.destroy();
+      return;
+    }
+
+    console.log(`[media-stream] Validated Twilio signature for CallSid=${callSid}`);
+
     wss.handleUpgrade(req, socket, head, (ws) => {
       wss.emit('connection', ws, req);
     });
