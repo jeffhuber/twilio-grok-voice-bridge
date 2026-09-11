@@ -2,7 +2,7 @@
 
 ## Vulnerability Reporting
 
-If you discover a security vulnerability in this bridge, please email security@[your-domain] or open a private security advisory on GitHub.
+If you discover a security vulnerability in this bridge, please report it via [GitHub Security Advisories](https://github.com/jeffhuber/twilio-grok-voice-bridge/security/advisories/new) or email jeff@[domain if available].
 
 ## Security Hardening Summary
 
@@ -31,7 +31,7 @@ All control-plane routes (`/call`, `/steer`, `/hangup`, `/voice`, `/transcript`)
 ### 4. Dependency Security
 
 - **npm audit:** All known vulnerabilities are resolved via `npm audit fix` or dependency overrides
-- **qs override:** Uses `qs@^6.16.0` to patch CVE-2024-xxxxx in express transitive dependencies
+- **qs override:** Uses `qs@^6.16.0` to patch CVE-2026-82417 (isBuffer DoS) and CVE-2026-82562 (comma-arrayLimit bypass) in express transitive dependencies
 
 ## Environment Variables
 
