@@ -2,7 +2,7 @@
 
 ## Vulnerability Reporting
 
-If you discover a security vulnerability in this bridge, please report it via [GitHub Security Advisories](https://github.com/jeffhuber/twilio-grok-voice-bridge/security/advisories/new) or email jeff@[domain if available].
+If you discover a security vulnerability in this bridge, please report it via [GitHub Security Advisories](https://github.com/jeffhuber/twilio-grok-voice-bridge/security/advisories/new).
 
 ## Security Hardening Summary
 
