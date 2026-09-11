@@ -118,6 +118,16 @@ This OSS bridge uses random `bridgeToken` query parameters for simplicity. Produ
 
 **Note:** Twilio Media Streams do not send CallSid or X-Twilio-Signature headers on WebSocket upgrade. CallSid arrives in the JSON `start` event payload. The bridge token + CallSid bind approach works correctly with Twilio's actual WebSocket flow.
 
+### Session Lifecycle & Error Handling
+
+**Crash containment:** All WebSocket message handlers validate and parse JSON defensively. Malformed or null frames are logged and ignored per-socket; parsing errors never crash the Node process.
+
+**Session garbage collection:** Orphan sessions (both WebSockets closed) and sessions exceeding `SESSION_MAX_AGE_MS` (default 2 hours) are automatically cleaned up every 2 minutes. This prevents memory leaks from interrupted or abandoned calls.
+
+**One stream per CallSid:** The bridge enforces one active Twilio Media Stream per CallSid. Duplicate stream attempts for the same call are rejected with WebSocket close code 1008.
+
+**Duplicate start protection:** After CallSid bind, subsequent `start` events on the same WebSocket are ignored to prevent re-applying custom parameters from potentially forged data.
+
 ### BRIDGE_API_KEY (CRITICAL)
 
 Set `BRIDGE_API_KEY` to a strong random secret to protect operator control-plane routes:
@@ -165,6 +175,7 @@ For public hosts, **always** use one of:
 | BRIDGE_API_KEY | **CRITICAL:** Shared secret for operator routes (Bearer or X-Bridge-Key) |
 | REQUIRE_BRIDGE_AUTH | Set to `1` to exit on startup if BRIDGE_API_KEY is missing |
 | BRIDGE_TOKEN_TTL_MS | Bridge token time-to-live in milliseconds (default 120000 = 2 minutes) |
+| SESSION_MAX_AGE_MS | Maximum session age before GC in milliseconds (default 7200000 = 2 hours) |
 | ENABLE_RECORDING | Set to `1` to enable dual-channel call recording (default off) |
 | SKIP_AI_DISCLOSURE | Set to `1` to disable AI disclosure (default: disclosure enabled; check legal requirements first) |
 | CONTACT_FULL_NAME | Optional; restaurant-book style |

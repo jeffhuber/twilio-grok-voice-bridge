@@ -328,6 +328,34 @@ function cleanupExpiredTokens() {
 
 setInterval(cleanupExpiredTokens, 60000);
 
+const SESSION_MAX_AGE_MS = Number(process.env.SESSION_MAX_AGE_MS || 7200000); // 2 hours
+
+function cleanupOrphanSessions() {
+  const now = Date.now();
+  let cleaned = 0;
+  for (const [callSid, session] of sessionsByCallSid.entries()) {
+    const age = now - (session.startedAt || now);
+    const wsGone = !session.twilioWs || session.twilioWs.readyState !== WebSocket.OPEN;
+    const grokGone = !session.grokWs || session.grokWs.readyState !== WebSocket.OPEN;
+    const isOrphan = wsGone && grokGone;
+    const isTooOld = age > SESSION_MAX_AGE_MS;
+
+    if (isOrphan || isTooOld) {
+      const reason = isTooOld ? 'max-age' : 'orphan';
+      console.log(`[gc] cleanup session callSid=${callSid} reason=${reason} age=${Math.round(age / 1000)}s`);
+      cleanupSession(session, { hangupTwilio: false });
+      sessionsByCallSid.delete(callSid);
+      pendingByCallSid.delete(callSid);
+      cleaned += 1;
+    }
+  }
+  if (cleaned > 0) {
+    console.log(`[gc] cleaned ${cleaned} session(s)`);
+  }
+}
+
+setInterval(cleanupOrphanSessions, 120000); // every 2 minutes
+
 /**
  * @typedef {object} TranscriptLine
  * @property {'them'|'agent'} role
@@ -794,10 +822,24 @@ function openGrokSession(session) {
       // Binary output transport not used; ignore
       return;
     }
+    if (!data || (typeof data !== 'string' && !Buffer.isBuffer(data))) {
+      console.warn(`[grok] invalid data type callSid=${session.callSid}`);
+      return;
+    }
     let event;
     try {
-      event = JSON.parse(data.toString());
-    } catch {
+      const text = data.toString();
+      if (!text || text.trim() === '') {
+        console.warn(`[grok] empty message callSid=${session.callSid}`);
+        return;
+      }
+      event = JSON.parse(text);
+    } catch (err) {
+      console.error(`[grok] JSON parse error callSid=${session.callSid}:`, err.message);
+      return;
+    }
+    if (!event || typeof event !== 'object') {
+      console.warn(`[grok] non-object event callSid=${session.callSid}`);
       return;
     }
     handleGrokEvent(session, event);
@@ -950,10 +992,24 @@ function handleGrokEvent(session, event) {
 }
 
 function handleTwilioMessage(session, raw) {
+  if (!raw || (typeof raw !== 'string' && !Buffer.isBuffer(raw))) {
+    console.warn(`[twilio] invalid data type callSid=${session.callSid}`);
+    return;
+  }
   let msg;
   try {
-    msg = JSON.parse(raw.toString());
-  } catch {
+    const text = raw.toString();
+    if (!text || text.trim() === '') {
+      console.warn(`[twilio] empty message callSid=${session.callSid}`);
+      return;
+    }
+    msg = JSON.parse(text);
+  } catch (err) {
+    console.error(`[twilio] JSON parse error callSid=${session.callSid}:`, err.message);
+    return;
+  }
+  if (!msg || typeof msg !== 'object') {
+    console.warn(`[twilio] non-object message callSid=${session.callSid}`);
     return;
   }
   const event = msg.event;
@@ -1405,10 +1461,24 @@ wss.on('connection', (ws, req) => {
   let boundToCallSid = false;
 
   ws.on('message', (data) => {
+    if (!data || (typeof data !== 'string' && !Buffer.isBuffer(data))) {
+      console.warn('[twilio] invalid data type on media-stream ws');
+      return;
+    }
     let msg;
     try {
-      msg = JSON.parse(data.toString());
-    } catch {
+      const text = data.toString();
+      if (!text || text.trim() === '') {
+        console.warn('[twilio] empty message on media-stream ws');
+        return;
+      }
+      msg = JSON.parse(text);
+    } catch (err) {
+      console.error('[twilio] JSON parse error on media-stream ws:', err.message);
+      return;
+    }
+    if (!msg || typeof msg !== 'object') {
+      console.warn('[twilio] non-object message on media-stream ws');
       return;
     }
 
@@ -1432,6 +1502,19 @@ wss.on('connection', (ws, req) => {
       if (session.callSid !== resolvedSid) {
         console.error(`[twilio] CallSid mismatch: expected=${session.callSid} actual=${resolvedSid} token=${bridgeToken.slice(0, 12)}...`);
         ws.close(1008, 'CallSid mismatch');
+        return;
+      }
+
+      // Reject duplicate start events after CallSid bind (prevents re-applying custom params)
+      if (boundToCallSid) {
+        console.warn(`[twilio] duplicate start event ignored callSid=${resolvedSid}`);
+        return;
+      }
+
+      // Prevent duplicate active streams for the same CallSid
+      if (session.twilioWs && session.twilioWs !== ws && session.twilioWs.readyState === WebSocket.OPEN) {
+        console.error(`[twilio] duplicate stream rejected for callSid=${resolvedSid} — one active stream per CallSid`);
+        ws.close(1008, 'Duplicate stream');
         return;
       }
 
@@ -1475,13 +1558,16 @@ wss.on('connection', (ws, req) => {
       }
     }
     if (bridgeToken) {
+      const originalEntry = claimedTokens.get(bridgeToken);
       claimedTokens.delete(bridgeToken);
       // Token DoS mitigation: restore token to pending if never bound to CallSid.
       // This prevents leaked token connect/disconnect loops from burning the real stream.
+      // Preserve original createdAt so TTL countdown is not reset on burn attempts.
       if (!boundToCallSid && session) {
-        const entry = { session, createdAt: Date.now() };
+        const originalCreatedAt = originalEntry?.createdAt || Date.now();
+        const entry = { session, createdAt: originalCreatedAt };
         pendingByToken.set(bridgeToken, entry);
-        console.log(`[token] restored to pending (not bound) token=${bridgeToken.slice(0, 12)}...`);
+        console.log(`[token] restored to pending (not bound) token=${bridgeToken.slice(0, 12)}... preserving original TTL`);
       }
     }
   });
