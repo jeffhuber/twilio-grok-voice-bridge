@@ -87,15 +87,35 @@ The `/media-stream` WebSocket endpoint uses a short-lived bridge token system:
 2. The token is embedded in the Media Stream URL query string: `wss://HOST/media-stream?bridgeToken=...`
 3. The token is also passed as a TwiML custom parameter
 4. On WebSocket upgrade, the bridge validates the token exists and hasn't expired (default 2 minutes TTL)
-5. On Twilio's `start` event, the bridge verifies the CallSid matches the pending session for that token
-6. Only after token + CallSid binding succeeds does the bridge open the xAI Realtime WebSocket
+5. **Token claim:** On upgrade, the token is atomically moved from pending to claimed state. Second upgrade attempts for the same token are rejected with 409 Conflict.
+6. On Twilio's `start` event, the bridge verifies the CallSid matches the pending session for that token
+7. **CallSid bind:** The CallSid is frozen when the session is created. On `start`, if the actual CallSid differs from the frozen value, the bridge closes the WebSocket (1008) and never opens the xAI Realtime session.
+8. Only after token claim + CallSid binding succeeds does the bridge open the xAI Realtime WebSocket
 
 **This prevents:**
 - Unauthorized WebSocket connections from consuming xAI credits
 - Attackers opening free xAI Realtime sessions without a legitimate Twilio call
-- Token reuse (tokens are single-use and expire after TTL)
+- Token reuse (tokens are single-use and claimed atomically)
+- Token burn DoS: claimed tokens cannot be re-claimed, so rapid connect/disconnect cannot exhaust tokens
+- CallSid forgery: stolen bridgeToken + forged `start` JSON cannot hijack a session with a different CallSid
 
-**Note:** Twilio Media Streams do not send CallSid or X-Twilio-Signature headers on WebSocket upgrade. CallSid arrives in the JSON `start` event payload. The bridge token approach works correctly with Twilio's actual WebSocket flow.
+**Token claim semantics:**
+- Tokens start in the `pending` state when created during `/call`
+- On WebSocket upgrade, the token is atomically moved to `claimed` state
+- A second upgrade with the same token fails immediately (409 Conflict)
+- Tokens expire after `BRIDGE_TOKEN_TTL_MS` (default 2 minutes) in either state
+- On close, the token is removed from the claimed map
+
+**CallSid bind semantics:**
+- The expected CallSid is frozen on the pending session when `/call` creates the Twilio call
+- On Twilio's `start` event, the bridge requires `actual CallSid === frozen CallSid`
+- Mismatch results in immediate WebSocket close (1008) with no Grok session opened
+- This blocks stolen token + forged `start` attacks
+
+**Note on production deployments:**
+This OSS bridge uses random `bridgeToken` query parameters for simplicity. Production deployments may prefer HMAC-based `/twiml-connect` patterns (sign the TwiML URL + CallSid with a secret, validate signature on upgrade). The OSS token approach is suitable for self-hosted / controlled environments; for higher-security production systems, consider HMAC signing over the CallSid + timestamp.
+
+**Note:** Twilio Media Streams do not send CallSid or X-Twilio-Signature headers on WebSocket upgrade. CallSid arrives in the JSON `start` event payload. The bridge token + CallSid bind approach works correctly with Twilio's actual WebSocket flow.
 
 ### BRIDGE_API_KEY (CRITICAL)
 
