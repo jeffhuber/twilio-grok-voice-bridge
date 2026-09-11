@@ -96,15 +96,16 @@ The `/media-stream` WebSocket endpoint uses a short-lived bridge token system:
 - Unauthorized WebSocket connections from consuming xAI credits
 - Attackers opening free xAI Realtime sessions without a legitimate Twilio call
 - Token reuse (tokens are single-use and claimed atomically)
-- Token burn DoS: claimed tokens cannot be re-claimed, so rapid connect/disconnect cannot exhaust tokens
+- Token burn DoS: tokens claimed but closed before CallSid bind are restored to pending, preventing leaked-token connect/disconnect loops from exhausting the real stream
 - CallSid forgery: stolen bridgeToken + forged `start` JSON cannot hijack a session with a different CallSid
 
 **Token claim semantics:**
 - Tokens start in the `pending` state when created during `/call`
-- On WebSocket upgrade, the token is atomically moved to `claimed` state
+- On WebSocket upgrade, tokens are checked: if already claimed → 409; if pending → claim; else → 403
 - A second upgrade with the same token fails immediately (409 Conflict)
 - Tokens expire after `BRIDGE_TOKEN_TTL_MS` (default 2 minutes) in either state
-- On close, the token is removed from the claimed map
+- On close, if the token was claimed but never bound to a CallSid, it is restored to pending (DoS mitigation)
+- Only after successful CallSid bind is the token permanently consumed
 
 **CallSid bind semantics:**
 - The expected CallSid is frozen on the pending session when `/call` creates the Twilio call

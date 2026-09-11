@@ -509,17 +509,6 @@ function createSession({ callSid, goal, context, voice, style, to, softContinue 
   return session;
 }
 
-function getActiveSession(callSid) {
-  if (callSid && sessionsByCallSid.has(callSid)) {
-    return sessionsByCallSid.get(callSid);
-  }
-  // Fall back to most recently active connected session
-  for (const s of sessionsByCallSid.values()) {
-    if (s.twilioWs || s.grokWs) return s;
-  }
-  return null;
-}
-
 function appendTranscript(session, role, text) {
   const line = { role, text: String(text).trim(), ts: Date.now() };
   if (!line.text) return;
@@ -1355,6 +1344,14 @@ server.on('upgrade', (req, socket, head) => {
       return;
     }
 
+    // 409 path: check claimed first, then pending, else 403
+    if (claimedTokens.has(bridgeToken)) {
+      console.error(`[media-stream] Token already claimed bridgeToken=${bridgeToken.slice(0, 12)}...`);
+      socket.write('HTTP/1.1 409 Conflict\r\n\r\n');
+      socket.destroy();
+      return;
+    }
+
     const entry = pendingByToken.get(bridgeToken);
     if (!entry) {
       console.error(`[media-stream] Unknown or expired bridgeToken=${bridgeToken.slice(0, 12)}...`);
@@ -1368,13 +1365,6 @@ server.on('upgrade', (req, socket, head) => {
       pendingByToken.delete(bridgeToken);
       console.error(`[media-stream] Expired bridgeToken=${bridgeToken.slice(0, 12)}...`);
       socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
-      socket.destroy();
-      return;
-    }
-
-    if (claimedTokens.has(bridgeToken)) {
-      console.error(`[media-stream] Token already claimed bridgeToken=${bridgeToken.slice(0, 12)}...`);
-      socket.write('HTTP/1.1 409 Conflict\r\n\r\n');
       socket.destroy();
       return;
     }
@@ -1451,20 +1441,8 @@ wss.on('connection', (ws, req) => {
       session.twilioWs = ws;
       session.streamSid = msg.start?.streamSid || msg.streamSid;
 
-      if (custom.goal && (!session.goal || session.goal === 'Assist the customer')) {
-        session.goal = custom.goal;
-      }
-      if (custom.context && (!session.context || custom.context.length > session.context.length)) {
-        session.context = custom.context;
-      }
-      if (custom.voice) session.voice = resolveVoiceId(custom.voice);
-      if (custom.style) session.style = normalizeStyle(custom.style);
-      if (custom.softContinue === 'true' || custom.softContinue === '1') {
-        session.softContinue = true;
-      }
-      session.vadThreshold = session.softContinue ? VAD_SOFT_THRESHOLD : VAD_THRESHOLD;
-      session.vadSilenceMs = session.softContinue ? VAD_SOFT_SILENCE_MS : VAD_SILENCE_MS;
-      session.instructions = buildInstructions(session.goal, session.context, session.style);
+      // After CallSid bind, ignore forged custom params (operator set these at /call).
+      // Do NOT overwrite goal/context/voice from potentially forged Twilio stream data.
 
       boundToCallSid = true;
       console.log(
@@ -1498,6 +1476,13 @@ wss.on('connection', (ws, req) => {
     }
     if (bridgeToken) {
       claimedTokens.delete(bridgeToken);
+      // Token DoS mitigation: restore token to pending if never bound to CallSid.
+      // This prevents leaked token connect/disconnect loops from burning the real stream.
+      if (!boundToCallSid && session) {
+        const entry = { session, createdAt: Date.now() };
+        pendingByToken.set(bridgeToken, entry);
+        console.log(`[token] restored to pending (not bound) token=${bridgeToken.slice(0, 12)}...`);
+      }
     }
   });
 
