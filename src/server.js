@@ -340,10 +340,15 @@ function cleanupOrphanSessions() {
     const isOrphan = wsGone && grokGone;
     const isTooOld = age > SESSION_MAX_AGE_MS;
 
-    if (isOrphan || isTooOld) {
-      const reason = isTooOld ? 'max-age' : 'orphan';
-      console.log(`[gc] cleanup session callSid=${callSid} reason=${reason} age=${Math.round(age / 1000)}s`);
+    if (isOrphan) {
+      console.log(`[gc] cleanup orphan session callSid=${callSid} age=${Math.round(age / 1000)}s`);
       cleanupSession(session, { hangupTwilio: false });
+      sessionsByCallSid.delete(callSid);
+      pendingByCallSid.delete(callSid);
+      cleaned += 1;
+    } else if (isTooOld) {
+      console.log(`[gc] cleanup max-age session callSid=${callSid} age=${Math.round(age / 1000)}s (hanging up)`);
+      cleanupSession(session, { hangupTwilio: true });
       sessionsByCallSid.delete(callSid);
       pendingByCallSid.delete(callSid);
       cleaned += 1;
@@ -1021,19 +1026,15 @@ function handleTwilioMessage(session, raw) {
 
     case 'start': {
       session.streamSid = msg.start?.streamSid || msg.streamSid;
+      // Defense in depth: do NOT allow custom parameters to mutate session properties.
+      // Session goal/context/voice/style are frozen at creation time (operator-controlled).
+      // Custom parameters are only logged for debugging.
       const custom = msg.start?.customParameters || {};
-      if (custom.goal && !session.goal) session.goal = custom.goal;
-      if (custom.context && (!session.context || custom.context.length > session.context.length)) {
-        session.context = custom.context;
+      if (custom.goal || custom.context || custom.voice || custom.style || custom.softContinue) {
+        console.log(
+          `[twilio] start custom params present but ignored (session frozen): goal=${!!custom.goal} context=${!!custom.context} voice=${!!custom.voice} style=${!!custom.style} softContinue=${!!custom.softContinue}`
+        );
       }
-      if (custom.voice) session.voice = resolveVoiceId(custom.voice);
-      if (custom.style) session.style = normalizeStyle(custom.style);
-      if (custom.softContinue === 'true' || custom.softContinue === '1') {
-        session.softContinue = true;
-      }
-      session.vadThreshold = session.softContinue ? VAD_SOFT_THRESHOLD : VAD_THRESHOLD;
-      session.vadSilenceMs = session.softContinue ? VAD_SOFT_SILENCE_MS : VAD_SILENCE_MS;
-      session.instructions = buildInstructions(session.goal, session.context, session.style);
       console.log(
         `[twilio] start streamSid=${session.streamSid} callSid=${session.callSid} style=${session.style || 'support'} goal=${(session.goal || '').slice(0, 60)}`
       );
