@@ -301,6 +301,8 @@ const sessionsByCallSid = new Map();
 const pendingByCallSid = new Map();
 /** @type {Map<string, {session: CallSession, createdAt: number}>} bridgeToken -> {session, timestamp} */
 const pendingByToken = new Map();
+/** @type {Map<string, {session: CallSession, createdAt: number}>} bridgeToken -> {session, timestamp} - claimed on upgrade */
+const claimedTokens = new Map();
 
 const BRIDGE_TOKEN_TTL_MS = Number(process.env.BRIDGE_TOKEN_TTL_MS || 120000); // 2 minutes
 
@@ -313,7 +315,13 @@ function cleanupExpiredTokens() {
   for (const [token, entry] of pendingByToken.entries()) {
     if (now - entry.createdAt > BRIDGE_TOKEN_TTL_MS) {
       pendingByToken.delete(token);
-      console.log(`[token] expired token=${token.slice(0, 12)}...`);
+      console.log(`[token] expired pending token=${token.slice(0, 12)}...`);
+    }
+  }
+  for (const [token, entry] of claimedTokens.entries()) {
+    if (now - entry.createdAt > BRIDGE_TOKEN_TTL_MS) {
+      claimedTokens.delete(token);
+      console.log(`[token] expired claimed token=${token.slice(0, 12)}...`);
     }
   }
 }
@@ -1229,9 +1237,10 @@ app.post('/call', requireBridgeAuth, async (req, res) => {
  */
 app.post('/steer', requireBridgeAuth, (req, res) => {
   const { callSid, text } = req.body || {};
+  if (!callSid) return res.status(400).json({ error: 'callSid is required' });
   if (!text) return res.status(400).json({ error: 'text is required' });
-  const session = getActiveSession(callSid);
-  if (!session) return res.status(404).json({ error: 'no active call' });
+  const session = sessionsByCallSid.get(callSid);
+  if (!session) return res.status(404).json({ error: 'call not found' });
 
   const coaching = String(text).trim();
   session.instructions =
@@ -1257,13 +1266,14 @@ app.post('/steer', requireBridgeAuth, (req, res) => {
 
 /**
  * Mid-call TTS voice switch.
- * Body: { callSid?, voice: "<xAI voice id or alias>", announce? }
+ * Body: { callSid: "<required>", voice: "<xAI voice id or alias>", announce? }
  */
 app.post('/voice', requireBridgeAuth, (req, res) => {
   const { callSid, voice, announce } = req.body || {};
+  if (!callSid) return res.status(400).json({ error: 'callSid is required' });
   if (!voice) return res.status(400).json({ error: 'voice is required' });
-  const session = getActiveSession(callSid);
-  if (!session) return res.status(404).json({ error: 'no active call' });
+  const session = sessionsByCallSid.get(callSid);
+  if (!session) return res.status(404).json({ error: 'call not found' });
   const result = switchSessionVoice(session, voice, {
     announce: announce !== false,
     reason: 'operator',
@@ -1305,8 +1315,9 @@ app.get('/transcript', requireBridgeAuth, (req, res) => {
  */
 app.post('/hangup', requireBridgeAuth, async (req, res) => {
   const { callSid, approve } = req.body || {};
-  const session = getActiveSession(callSid);
-  if (!session) return res.status(404).json({ error: 'no active call' });
+  if (!callSid) return res.status(400).json({ error: 'callSid is required' });
+  const session = sessionsByCallSid.get(callSid);
+  if (!session) return res.status(404).json({ error: 'call not found' });
 
   // Default: approve hangup when /hangup is called (operator action)
   const approved = approve !== false;
@@ -1361,7 +1372,16 @@ server.on('upgrade', (req, socket, head) => {
       return;
     }
 
-    console.log(`[media-stream] Validated bridgeToken=${bridgeToken.slice(0, 12)}...`);
+    if (claimedTokens.has(bridgeToken)) {
+      console.error(`[media-stream] Token already claimed bridgeToken=${bridgeToken.slice(0, 12)}...`);
+      socket.write('HTTP/1.1 409 Conflict\r\n\r\n');
+      socket.destroy();
+      return;
+    }
+
+    console.log(`[media-stream] Claiming bridgeToken=${bridgeToken.slice(0, 12)}...`);
+    claimedTokens.set(bridgeToken, entry);
+    pendingByToken.delete(bridgeToken);
 
     wss.handleUpgrade(req, socket, head, (ws) => {
       wss.emit('connection', ws, req);
@@ -1383,9 +1403,9 @@ wss.on('connection', (ws, req) => {
     return;
   }
 
-  const entry = pendingByToken.get(bridgeToken);
+  const entry = claimedTokens.get(bridgeToken);
   if (!entry) {
-    console.error(`[twilio] Unknown bridgeToken=${bridgeToken.slice(0, 12)}...`);
+    console.error(`[twilio] Token not claimed bridgeToken=${bridgeToken.slice(0, 12)}...`);
     ws.close(1008, 'Invalid bridgeToken');
     return;
   }
@@ -1419,29 +1439,14 @@ wss.on('connection', (ws, req) => {
         return;
       }
 
-      const existingSession = sessionsByCallSid.get(resolvedSid) || pendingByCallSid.get(resolvedSid);
-      if (existingSession && existingSession !== session) {
-        session.goal = existingSession.goal || session.goal;
-        session.context = existingSession.context || session.context;
-        session.voice = existingSession.voice || session.voice;
-        session.style = existingSession.style || session.style;
-        session.to = existingSession.to || session.to;
-        session.softContinue = existingSession.softContinue ?? session.softContinue;
-        session.vadThreshold = existingSession.vadThreshold ?? session.vadThreshold;
-        session.vadSilenceMs = existingSession.vadSilenceMs ?? session.vadSilenceMs;
-        session.instructions =
-          existingSession.instructions ||
-          buildInstructions(session.goal, session.context, session.style);
-      }
-
       if (session.callSid !== resolvedSid) {
-        sessionsByCallSid.delete(session.callSid);
-        session.callSid = resolvedSid;
-        sessionsByCallSid.set(resolvedSid, session);
+        console.error(`[twilio] CallSid mismatch: expected=${session.callSid} actual=${resolvedSid} token=${bridgeToken.slice(0, 12)}...`);
+        ws.close(1008, 'CallSid mismatch');
+        return;
       }
 
       pendingByCallSid.delete(resolvedSid);
-      pendingByToken.delete(bridgeToken);
+      claimedTokens.delete(bridgeToken);
 
       session.twilioWs = ws;
       session.streamSid = msg.start?.streamSid || msg.streamSid;
@@ -1491,8 +1496,8 @@ wss.on('connection', (ws, req) => {
         session.grokWs = null;
       }
     }
-    if (!boundToCallSid && bridgeToken) {
-      pendingByToken.delete(bridgeToken);
+    if (bridgeToken) {
+      claimedTokens.delete(bridgeToken);
     }
   });
 
