@@ -2,6 +2,7 @@
 
 **Repo:** https://github.com/jeffhuber/twilio-grok-voice-bridge
 
+⚠️ **Experimental**: This bridge is a proof-of-concept for wiring Twilio voice to xAI Grok Voice realtime. It is not production-hardened out of the box. Always configure authentication (`BRIDGE_API_KEY`), review AI disclosure requirements for your jurisdiction, and test recording/consent policies before deploying.
 
 Wire **Twilio outbound voice** to **xAI Grok Voice** (realtime) over Media Streams.
 
@@ -77,6 +78,25 @@ Liveness + config summary (no secrets).
 
 **WARNING:** Without authentication, anyone who can reach this bridge can place Twilio calls and spend your account.
 
+### Media Stream Authentication (WebSocket)
+
+The `/media-stream` WebSocket endpoint uses a short-lived bridge token system:
+
+**How it works:**
+1. When `/call` is invoked, the bridge generates a random `bridgeToken` (32 bytes, base64url)
+2. The token is embedded in the Media Stream URL query string: `wss://HOST/media-stream?bridgeToken=...`
+3. The token is also passed as a TwiML custom parameter
+4. On WebSocket upgrade, the bridge validates the token exists and hasn't expired (default 2 minutes TTL)
+5. On Twilio's `start` event, the bridge verifies the CallSid matches the pending session for that token
+6. Only after token + CallSid binding succeeds does the bridge open the xAI Realtime WebSocket
+
+**This prevents:**
+- Unauthorized WebSocket connections from consuming xAI credits
+- Attackers opening free xAI Realtime sessions without a legitimate Twilio call
+- Token reuse (tokens are single-use and expire after TTL)
+
+**Note:** Twilio Media Streams do not send CallSid or X-Twilio-Signature headers on WebSocket upgrade. CallSid arrives in the JSON `start` event payload. The bridge token approach works correctly with Twilio's actual WebSocket flow.
+
 ### BRIDGE_API_KEY (CRITICAL)
 
 Set `BRIDGE_API_KEY` to a strong random secret to protect operator control-plane routes:
@@ -90,13 +110,16 @@ The bridge accepts either header:
 - `Authorization: Bearer <BRIDGE_API_KEY>`
 - `X-Bridge-Key: <BRIDGE_API_KEY>`
 
-Twilio-facing webhook and Media Streams paths remain unauthenticated (Twilio cannot send custom API keys).
-
 ### Auth policy
 
 - **BRIDGE_API_KEY set:** operator routes require the key (401 JSON `{ error: "unauthorized" }` on miss/mismatch).
 - **REQUIRE_BRIDGE_AUTH=1 + no key:** server exits on startup.
 - **No key, no REQUIRE flag:** server starts with a loud warning; operator routes are OPEN (dev/localhost only).
+
+### Recording and Disclosure
+
+- **Recording** is **opt-in only** (default off). Set `ENABLE_RECORDING=1` to enable dual-channel call recording.
+- **AI disclosure** is **on by default**. The agent is instructed to disclose it is AI at the start of calls. Set `SKIP_AI_DISCLOSURE=1` to disable (review legal requirements in your jurisdiction first).
 
 ### Production deployment
 
@@ -120,6 +143,9 @@ For public hosts, **always** use one of:
 | PUBLIC_HOST | Public hostname for media-stream WSS (no scheme) |
 | BRIDGE_API_KEY | **CRITICAL:** Shared secret for operator routes (Bearer or X-Bridge-Key) |
 | REQUIRE_BRIDGE_AUTH | Set to `1` to exit on startup if BRIDGE_API_KEY is missing |
+| BRIDGE_TOKEN_TTL_MS | Bridge token time-to-live in milliseconds (default 120000 = 2 minutes) |
+| ENABLE_RECORDING | Set to `1` to enable dual-channel call recording (default off) |
+| SKIP_AI_DISCLOSURE | Set to `1` to disable AI disclosure (default: disclosure enabled; check legal requirements first) |
 | CONTACT_FULL_NAME | Optional; restaurant-book style |
 | CONTACT_MOBILE | Optional callback number for restaurant-book |
 | BARGE_IN_CONFIRM_MS | Barge-in confirm window ms (default 280) |
@@ -144,9 +170,11 @@ Optional softContinue true on POST /call enables post-playback soft-continue.
 ## Security notes
 
 - **Set BRIDGE_API_KEY** to protect operator routes or restrict access via Cloudflare Access / localhost-only binding.
+- **Media Stream WebSocket** uses short-lived bridge tokens and validates CallSid binding before opening xAI sessions.
+- **Recording is opt-in** via `ENABLE_RECORDING=1` (default off).
+- **AI disclosure is on by default**. Review legal requirements before setting `SKIP_AI_DISCLOSURE=1`.
 - Keep Twilio tokens, xAI keys, BRIDGE_API_KEY, and real phone numbers out of git.
 - Twilio needs a public WSS URL for Media Streams.
-- Dual-channel recording is enabled on call create.
 
 ## License
 
