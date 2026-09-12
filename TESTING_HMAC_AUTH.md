@@ -4,11 +4,13 @@ This document describes how to test the new HMAC-SHA256 signature-based authenti
 
 ## Overview
 
-The HMAC authentication replaces the previous bearer token approach with cryptographic signatures that are:
-- Bound to specific CallSid and timestamp
-- Non-replayable (single-use)
-- Time-limited (default 5 minutes)
-- Require knowledge of `BRIDGE_API_KEY` to forge
+The HMAC authentication improves upon the previous bearer token approach with:
+- **Unforgeability:** HMAC requires `BRIDGE_API_KEY`; bearer tokens were just random bytes
+- **CallSid-in-MAC:** CallSid cryptographically bound to signature
+- **Late mint:** Signature generated at `/twiml-connect` fetch time (tighter window)
+- **Time-limited:** Default 2 minutes (configurable via `MEDIA_AUTH_WINDOW_MS`)
+- **Signature invalidation:** Old signatures dropped on retry
+- **X-Twilio-Signature validation:** `/twiml-connect` protected when `TWILIO_AUTH_TOKEN` set
 
 ## Prerequisites
 
@@ -48,7 +50,7 @@ console.log('Timestamp:', timestamp);
 function verifyMediaAuthSignature(callSid, timestamp, signature) {
   const now = Date.now();
   const tsNum = Number(timestamp);
-  const MEDIA_AUTH_WINDOW_MS = 300000; // 5 minutes
+  const MEDIA_AUTH_WINDOW_MS = 120000; // 2 minutes
   
   if (!Number.isFinite(tsNum) || tsNum <= 0) {
     return { valid: false, error: 'invalid timestamp' };
@@ -97,6 +99,8 @@ console.log('Expired signature:', result3);
 ## Integration Tests
 
 ### Test 3: Place a Call via /call Endpoint
+
+**Note:** Twilio defaults to POST for URL fetches. The bridge explicitly sets `method: 'POST'` and `/twiml-connect` accepts both GET and POST (reads `CallSid` from `req.body` or `req.query`).
 
 ```bash
 # Set environment variables
@@ -244,17 +248,21 @@ The signature verification uses `crypto.timingSafeEqual` to prevent timing attac
 
 ## Expected Behavior
 
-### Before HMAC Auth (Bearer Token)
-- ❌ Leaked token + CallSid could be reused multiple times within 2-minute TTL
-- ❌ Token itself had no cryptographic binding to CallSid
-- ❌ Attacker with leaked URL could replay until expiration
+### Bearer Token vs HMAC (What Changed)
 
-### After HMAC Auth
-- ✅ Signature cryptographically bound to CallSid and timestamp
-- ✅ Single-use: claimed once, 409 on replay
-- ✅ Time-limited: 5-minute window (configurable)
-- ✅ Non-forgeable without knowing `BRIDGE_API_KEY`
-- ✅ Replay protection even within TTL window
+**Main branch already had:**
+- ✅ Single-use claim (tokens claimed once, 409 on replay)
+- ✅ CallSid binding (session frozen to CallSid)
+
+**NEW with HMAC:**
+- ✅ **Unforgeability:** HMAC requires `BRIDGE_API_KEY`; bearer tokens were random
+- ✅ **CallSid-in-MAC:** Cryptographically bound (tampering invalidates signature)
+- ✅ **Late mint:** Signature at `/twiml-connect` fetch (tighter window)
+- ✅ **Signature invalidation:** Old signatures dropped on retry
+- ✅ **X-Twilio-Signature validation:** `/twiml-connect` protected from sessionId theft
+
+**Residual (both approaches):**
+- ⚠️ Stolen URL + forged `start.callSid` can bind within TTL (single-use only)
 
 ## Common Issues
 
@@ -263,7 +271,7 @@ The signature verification uses `crypto.timingSafeEqual` to prevent timing attac
 **Fix:** Set `BRIDGE_API_KEY` environment variable
 
 ### Issue: "HMAC verification failed: timestamp expired"
-**Cause:** Timestamp is older than `MEDIA_AUTH_WINDOW_MS` (default 5 minutes)
+**Cause:** Timestamp is older than `MEDIA_AUTH_WINDOW_MS` (default 2 minutes)
 **Fix:** Ensure clocks are synchronized; Twilio should connect quickly after TwiML fetch
 
 ### Issue: 409 Conflict on media stream connection
@@ -283,4 +291,11 @@ HMAC-SHA256 is fast (sub-millisecond on modern hardware):
 
 ## Conclusion
 
-The HMAC-based authentication provides strong, production-grade security for media stream WebSocket connections. Unlike bearer tokens, HMAC signatures cannot be forged or replayed, even if intercepted, making them suitable for hostile edge environments.
+The HMAC-based authentication improves media stream security through:
+1. **Unforgeability** (requires `BRIDGE_API_KEY`)
+2. **CallSid-in-MAC** (cryptographic binding prevents tampering)
+3. **Late mint** (signatures generated at TwiML fetch, not call creation)
+4. **Signature invalidation** (retries drop old signatures)
+5. **X-Twilio-Signature validation** (protects `/twiml-connect` from sessionId theft when `TWILIO_AUTH_TOKEN` set)
+
+Main branch already had single-use claim and CallSid binding. HMAC adds cryptographic unforgeability and tighter security properties.
