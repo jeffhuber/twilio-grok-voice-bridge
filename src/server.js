@@ -305,12 +305,7 @@ const pendingByToken = new Map();
 /** @type {Map<string, {session: CallSession, createdAt: number}>} HMAC signature -> {session, timestamp} - claimed on upgrade */
 const claimedTokens = new Map();
 
-const BRIDGE_TOKEN_TTL_MS = Number(process.env.BRIDGE_TOKEN_TTL_MS || 120000); // 2 minutes
-const MEDIA_AUTH_WINDOW_MS = Number(process.env.MEDIA_AUTH_WINDOW_MS || 300000); // 5 minutes
-
-function generateBridgeToken() {
-  return crypto.randomBytes(32).toString('base64url');
-}
+const MEDIA_AUTH_WINDOW_MS = Number(process.env.MEDIA_AUTH_WINDOW_MS || 120000); // 2 minutes
 
 /**
  * Generate HMAC signature for media stream authentication.
@@ -1274,10 +1269,11 @@ app.get('/health', (_req, res) => {
   });
 });
 
-app.get('/twiml-connect', (req, res) => {
+app.all('/twiml-connect', (req, res) => {
   try {
-    const sessionId = req.query.sessionId;
-    const callSid = req.query.CallSid; // Twilio provides CallSid as query param
+    // Twilio defaults to POST; read from body or query
+    const sessionId = req.body?.sessionId || req.query.sessionId;
+    const callSid = req.body?.CallSid || req.query.CallSid;
 
     if (!sessionId) {
       console.error('[twiml-connect] Missing sessionId');
@@ -1289,6 +1285,23 @@ app.get('/twiml-connect', (req, res) => {
       return res.status(400).type('text/xml').send('<Response><Hangup/></Response>');
     }
 
+    // Validate X-Twilio-Signature if TWILIO_AUTH_TOKEN is set
+    if (TWILIO_AUTH_TOKEN) {
+      const twilioSignature = req.headers['x-twilio-signature'];
+      if (!twilioSignature) {
+        console.error(`[twiml-connect] Missing X-Twilio-Signature callSid=${callSid}`);
+        return res.status(403).type('text/xml').send('<Response><Hangup/></Response>');
+      }
+
+      const url = `https://${PUBLIC_HOST}${req.originalUrl}`;
+      const params = req.method === 'POST' ? req.body : req.query;
+      
+      if (!twilio.validateRequest(TWILIO_AUTH_TOKEN, twilioSignature, url, params)) {
+        console.error(`[twiml-connect] Invalid X-Twilio-Signature callSid=${callSid}`);
+        return res.status(403).type('text/xml').send('<Response><Hangup/></Response>');
+      }
+    }
+
     // Look up pending session by temp ID or real CallSid
     let session = pendingByCallSid.get(sessionId);
     if (!session) {
@@ -1296,7 +1309,8 @@ app.get('/twiml-connect', (req, res) => {
     }
 
     if (!session) {
-      console.error(`[twiml-connect] Session not found sessionId=${sessionId} callSid=${callSid}`);
+      const redactedId = sessionId ? `${sessionId.slice(0, 8)}...` : 'null';
+      console.error(`[twiml-connect] Session not found sessionId=${redactedId} callSid=${callSid}`);
       return res.status(404).type('text/xml').send('<Response><Hangup/></Response>');
     }
 
@@ -1308,7 +1322,14 @@ app.get('/twiml-connect', (req, res) => {
       sessionsByCallSid.set(callSid, session);
     }
 
-    // Generate HMAC auth params
+    // Invalidate previous signature for this session before minting new one
+    if (session.mediaAuthSignature) {
+      pendingByToken.delete(session.mediaAuthSignature);
+      claimedTokens.delete(session.mediaAuthSignature);
+      console.log(`[twiml-connect] Invalidated previous signature callSid=${callSid}`);
+    }
+
+    // Generate new HMAC auth params
     const timestamp = Date.now();
     const signature = generateMediaAuthSignature(callSid, timestamp);
 
@@ -1327,7 +1348,7 @@ app.get('/twiml-connect', (req, res) => {
       signature,
     });
 
-    console.log(`[twiml-connect] Generated TwiML callSid=${callSid} ts=${timestamp}`);
+    console.log(`[twiml-connect] Generated TwiML callSid=${callSid} ts=${timestamp} method=${req.method}`);
     res.type('text/xml').send(twiml);
   } catch (err) {
     console.error('[twiml-connect] Error:', err.message);
@@ -1376,6 +1397,7 @@ app.post('/call', requireBridgeAuth, async (req, res) => {
       to,
       from: TWILIO_FROM_NUMBER,
       url: twimlUrl,
+      method: 'POST', // Explicit POST (Twilio default, but be clear)
       record: ENABLE_RECORDING,
       recordingChannels: ENABLE_RECORDING ? 'dual' : undefined,
     });
@@ -1386,7 +1408,8 @@ app.post('/call', requireBridgeAuth, async (req, res) => {
     pendingByCallSid.delete(tempId);
     pendingByCallSid.set(callSid, session);
 
-    console.log(`[call] placed sid=${callSid} to=${to} style=${resolvedStyle} twimlUrl=${twimlUrl}`);
+    const redactedTwimlUrl = `https://${PUBLIC_HOST}/twiml-connect?sessionId=${tempId.slice(0, 8)}...`;
+    console.log(`[call] placed sid=${callSid} to=${to} style=${resolvedStyle} twimlUrl=${redactedTwimlUrl}`);
     res.json({
       ok: true,
       callSid: call.sid,
