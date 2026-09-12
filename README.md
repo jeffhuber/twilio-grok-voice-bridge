@@ -89,7 +89,7 @@ The `/media-stream` WebSocket endpoint uses **HMAC-SHA256 signature-based authen
 4. These parameters are also passed as TwiML custom parameters for defense-in-depth verification
 5. On WebSocket upgrade, the bridge:
    - Verifies the HMAC signature using constant-time comparison
-   - Checks timestamp is within `MEDIA_AUTH_WINDOW_MS` (default 5 minutes)
+   - Checks timestamp is within `MEDIA_AUTH_WINDOW_MS` (default 2 minutes)
    - Ensures the signature hasn't been claimed before (prevents replay)
    - Validates CallSid matches the pending session
 6. **Signature claim:** On upgrade, the signature is atomically moved from pending to claimed state. Second upgrade attempts with the same signature are rejected with 409 Conflict.
@@ -99,7 +99,7 @@ The `/media-stream` WebSocket endpoint uses **HMAC-SHA256 signature-based authen
 8. Only after HMAC verification + CallSid binding succeeds does the bridge open the xAI Realtime WebSocket
 
 **This prevents:**
-- **Replay attacks:** Signatures are single-use and time-limited (default 5 minutes)
+- **Replay attacks:** Signatures are single-use and time-limited (default 2 minutes)
 - **Token leakage:** Even if a signature is intercepted, it's bound to a specific CallSid and timestamp
 - **Bearer token weakness:** Unlike bare tokens, HMAC signatures cannot be forged without knowing `BRIDGE_API_KEY`
 - **CallSid forgery:** Signature verification fails if CallSid is tampered with
