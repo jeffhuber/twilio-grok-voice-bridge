@@ -80,43 +80,45 @@ Liveness + config summary (no secrets).
 
 ### Media Stream Authentication (WebSocket)
 
-The `/media-stream` WebSocket endpoint uses a short-lived bridge token system:
+The `/media-stream` WebSocket endpoint uses **HMAC-SHA256 signature-based authentication** for strong, non-replayable security:
 
 **How it works:**
-1. When `/call` is invoked, the bridge generates a random `bridgeToken` (32 bytes, base64url)
-2. The token is embedded in the Media Stream URL query string: `wss://HOST/media-stream?bridgeToken=...`
-3. The token is also passed as a TwiML custom parameter
-4. On WebSocket upgrade, the bridge validates the token exists and hasn't expired (default 2 minutes TTL)
-5. **Token claim:** On upgrade, the token is atomically moved from pending to claimed state. Second upgrade attempts for the same token are rejected with 409 Conflict.
-6. On Twilio's `start` event, the bridge verifies the CallSid matches the pending session for that token
-7. **CallSid bind:** The CallSid is frozen when the session is created. On `start`, if the actual CallSid differs from the frozen value, the bridge closes the WebSocket (1008) and never opens the xAI Realtime session.
-8. Only after token claim + CallSid binding succeeds does the bridge open the xAI Realtime WebSocket
+1. When `/call` is invoked, Twilio fetches TwiML from the `/twiml-connect` endpoint
+2. The bridge generates HMAC-SHA256 signature: `HMAC(BRIDGE_API_KEY, callSid:timestamp)`
+3. The signature, CallSid, and timestamp are embedded in the Media Stream URL: `wss://HOST/media-stream?callSid=...&timestamp=...&signature=...`
+4. These parameters are also passed as TwiML custom parameters for defense-in-depth verification
+5. On WebSocket upgrade, the bridge:
+   - Verifies the HMAC signature using constant-time comparison
+   - Checks timestamp is within `MEDIA_AUTH_WINDOW_MS` (default 5 minutes)
+   - Ensures the signature hasn't been claimed before (prevents replay)
+   - Validates CallSid matches the pending session
+6. **Signature claim:** On upgrade, the signature is atomically moved from pending to claimed state. Second upgrade attempts with the same signature are rejected with 409 Conflict.
+7. On Twilio's `start` event, the bridge verifies:
+   - CallSid from Twilio matches the URL CallSid
+   - Custom parameters match URL parameters (prevents parameter injection)
+8. Only after HMAC verification + CallSid binding succeeds does the bridge open the xAI Realtime WebSocket
 
 **This prevents:**
-- Unauthorized WebSocket connections from consuming xAI credits
-- Attackers opening free xAI Realtime sessions without a legitimate Twilio call
-- Token reuse (tokens are single-use and claimed atomically)
-- Token burn DoS: tokens claimed but closed before CallSid bind are restored to pending, preventing leaked-token connect/disconnect loops from exhausting the real stream
-- CallSid forgery: stolen bridgeToken + forged `start` JSON cannot hijack a session with a different CallSid
+- **Replay attacks:** Signatures are single-use and time-limited (default 5 minutes)
+- **Token leakage:** Even if a signature is intercepted, it's bound to a specific CallSid and timestamp
+- **Bearer token weakness:** Unlike bare tokens, HMAC signatures cannot be forged without knowing `BRIDGE_API_KEY`
+- **CallSid forgery:** Signature verification fails if CallSid is tampered with
+- **Parameter injection:** Custom parameters are cross-checked against URL parameters
+- **Signature burn DoS:** Claimed signatures that close before CallSid bind are restored to pending with preserved TTL
 
-**Token claim semantics:**
-- Tokens start in the `pending` state when created during `/call`
-- On WebSocket upgrade, tokens are checked: if already claimed → 409; if pending → claim; else → 403
-- A second upgrade with the same token fails immediately (409 Conflict)
-- Tokens expire after `BRIDGE_TOKEN_TTL_MS` (default 2 minutes) in either state
-- On close, if the token was claimed but never bound to a CallSid, it is restored to pending (DoS mitigation)
-- Only after successful CallSid bind is the token permanently consumed
+**Signature verification:**
+- HMAC-SHA256 signature over `callSid:timestamp` using `BRIDGE_API_KEY` as secret
+- Constant-time comparison prevents timing attacks
+- Timestamp must be within `MEDIA_AUTH_WINDOW_MS` (default 5 minutes)
+- Signatures are single-use (claimed atomically on upgrade)
 
-**CallSid bind semantics:**
-- The expected CallSid is frozen on the pending session when `/call` creates the Twilio call
-- On Twilio's `start` event, the bridge requires `actual CallSid === frozen CallSid`
-- Mismatch results in immediate WebSocket close (1008) with no Grok session opened
-- This blocks stolen token + forged `start` attacks
+**Security properties:**
+- **Strong binding:** Signature is cryptographically bound to CallSid and timestamp
+- **Non-replayable:** Each call gets a unique signature; replays fail even within TTL
+- **Time-limited:** Timestamps expire after `MEDIA_AUTH_WINDOW_MS`
+- **No bearer tokens:** Cannot be used without knowing the secret key
 
-**Note on production deployments:**
-This OSS bridge uses random `bridgeToken` query parameters for simplicity. Production deployments may prefer HMAC-based `/twiml-connect` patterns (sign the TwiML URL + CallSid with a secret, validate signature on upgrade). The OSS token approach is suitable for self-hosted / controlled environments; for higher-security production systems, consider HMAC signing over the CallSid + timestamp.
-
-**Note:** Twilio Media Streams do not send CallSid or X-Twilio-Signature headers on WebSocket upgrade. CallSid arrives in the JSON `start` event payload. The bridge token + CallSid bind approach works correctly with Twilio's actual WebSocket flow.
+**Note:** This HMAC-based approach provides production-grade security for hostile edge environments. The signature cannot be forged or reused, and leaked credentials only work for the specific CallSid + timestamp they were generated for, within the expiration window.
 
 ### Session Lifecycle & Error Handling
 
@@ -172,9 +174,9 @@ For public hosts, **always** use one of:
 | XAI_VOICE | Default TTS voice id (example: ara) |
 | PORT | HTTP listen port (default 3000) |
 | PUBLIC_HOST | Public hostname for media-stream WSS (no scheme) |
-| BRIDGE_API_KEY | **CRITICAL:** Shared secret for operator routes (Bearer or X-Bridge-Key) |
+| BRIDGE_API_KEY | **CRITICAL:** Shared secret for operator routes (Bearer or X-Bridge-Key) AND HMAC signing key for media stream auth |
 | REQUIRE_BRIDGE_AUTH | Set to `1` to exit on startup if BRIDGE_API_KEY is missing |
-| BRIDGE_TOKEN_TTL_MS | Bridge token time-to-live in milliseconds (default 120000 = 2 minutes) |
+| MEDIA_AUTH_WINDOW_MS | HMAC signature validity window in milliseconds (default 300000 = 5 minutes) |
 | SESSION_MAX_AGE_MS | Maximum session age before GC in milliseconds (default 7200000 = 2 hours) |
 | ENABLE_RECORDING | Set to `1` to enable dual-channel call recording (default off) |
 | SKIP_AI_DISCLOSURE | Set to `1` to disable AI disclosure (default: disclosure enabled; check legal requirements first) |
@@ -201,12 +203,13 @@ Optional softContinue true on POST /call enables post-playback soft-continue.
 
 ## Security notes
 
-- **Set BRIDGE_API_KEY** to protect operator routes or restrict access via Cloudflare Access / localhost-only binding.
-- **Media Stream WebSocket** uses short-lived bridge tokens and validates CallSid binding before opening xAI sessions.
+- **Set BRIDGE_API_KEY** to protect operator routes AND enable HMAC-based media stream authentication. This key serves dual purposes: HTTP auth and HMAC signing.
+- **Media Stream WebSocket** uses HMAC-SHA256 signature authentication (not bearer tokens) for strong, non-replayable security. Signatures are cryptographically bound to CallSid + timestamp.
 - **Recording is opt-in** via `ENABLE_RECORDING=1` (default off).
 - **AI disclosure is on by default**. Review legal requirements before setting `SKIP_AI_DISCLOSURE=1`.
 - Keep Twilio tokens, xAI keys, BRIDGE_API_KEY, and real phone numbers out of git.
 - Twilio needs a public WSS URL for Media Streams.
+- **BRIDGE_API_KEY is required for secure deployments**: Without it, both operator routes and media stream auth are weakened.
 
 ## License
 

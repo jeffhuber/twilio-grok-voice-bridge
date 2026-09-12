@@ -278,14 +278,15 @@ if (!XAI_API_KEY) {
   console.warn('[warn] XAI_API_KEY missing — media-stream bridge will fail until set');
 }
 if (REQUIRE_BRIDGE_AUTH && !BRIDGE_API_KEY) {
-  console.error('[error] REQUIRE_BRIDGE_AUTH=1 but BRIDGE_API_KEY is not set — server will refuse operator routes');
+  console.error('[error] REQUIRE_BRIDGE_AUTH=1 but BRIDGE_API_KEY is not set — server will refuse operator routes and HMAC auth will fail');
   process.exit(1);
 }
 if (!BRIDGE_API_KEY) {
   console.warn('');
   console.warn('[SECURITY WARNING] BRIDGE_API_KEY is not set!');
   console.warn('[SECURITY WARNING] Operator control-plane routes (/call, /steer, /hangup, /voice, /transcript) are UNPROTECTED.');
-  console.warn('[SECURITY WARNING] Anyone who can reach this host can spend your Twilio account.');
+  console.warn('[SECURITY WARNING] Media stream HMAC authentication is DISABLED (will fall back to weaker auth).');
+  console.warn('[SECURITY WARNING] Anyone who can reach this host can spend your Twilio account and xAI credits.');
   console.warn('[SECURITY WARNING] Set BRIDGE_API_KEY or put this server behind Cloudflare Access / localhost-only.');
   console.warn('');
 }
@@ -299,29 +300,89 @@ const twilioClient =
 const sessionsByCallSid = new Map();
 /** Pending metadata keyed before stream start (callSid known after create) */
 const pendingByCallSid = new Map();
-/** @type {Map<string, {session: CallSession, createdAt: number}>} bridgeToken -> {session, timestamp} */
+/** @type {Map<string, {session: CallSession, createdAt: number}>} HMAC signature -> {session, timestamp} */
 const pendingByToken = new Map();
-/** @type {Map<string, {session: CallSession, createdAt: number}>} bridgeToken -> {session, timestamp} - claimed on upgrade */
+/** @type {Map<string, {session: CallSession, createdAt: number}>} HMAC signature -> {session, timestamp} - claimed on upgrade */
 const claimedTokens = new Map();
 
 const BRIDGE_TOKEN_TTL_MS = Number(process.env.BRIDGE_TOKEN_TTL_MS || 120000); // 2 minutes
+const MEDIA_AUTH_WINDOW_MS = Number(process.env.MEDIA_AUTH_WINDOW_MS || 300000); // 5 minutes
 
 function generateBridgeToken() {
   return crypto.randomBytes(32).toString('base64url');
 }
 
+/**
+ * Generate HMAC signature for media stream authentication.
+ * Signature is HMAC-SHA256(secret, callSid:timestamp)
+ */
+function generateMediaAuthSignature(callSid, timestamp) {
+  if (!BRIDGE_API_KEY) {
+    throw new Error('BRIDGE_API_KEY required for HMAC media auth');
+  }
+  const message = `${callSid}:${timestamp}`;
+  const hmac = crypto.createHmac('sha256', BRIDGE_API_KEY);
+  hmac.update(message);
+  return hmac.digest('base64url');
+}
+
+/**
+ * Verify HMAC signature for media stream authentication.
+ * Returns { valid: boolean, error?: string }
+ */
+function verifyMediaAuthSignature(callSid, timestamp, signature) {
+  if (!BRIDGE_API_KEY) {
+    return { valid: false, error: 'BRIDGE_API_KEY not configured' };
+  }
+  
+  const now = Date.now();
+  const tsNum = Number(timestamp);
+  
+  if (!Number.isFinite(tsNum) || tsNum <= 0) {
+    return { valid: false, error: 'invalid timestamp' };
+  }
+  
+  const age = now - tsNum;
+  if (age < 0) {
+    return { valid: false, error: 'timestamp in future' };
+  }
+  
+  if (age > MEDIA_AUTH_WINDOW_MS) {
+    return { valid: false, error: 'timestamp expired' };
+  }
+  
+  const expected = generateMediaAuthSignature(callSid, timestamp);
+  
+  try {
+    const sigBuf = Buffer.from(signature, 'utf8');
+    const expectedBuf = Buffer.from(expected, 'utf8');
+    
+    if (sigBuf.length !== expectedBuf.length) {
+      return { valid: false, error: 'signature mismatch' };
+    }
+    
+    if (!crypto.timingSafeEqual(sigBuf, expectedBuf)) {
+      return { valid: false, error: 'signature mismatch' };
+    }
+    
+    return { valid: true };
+  } catch (err) {
+    return { valid: false, error: `signature verification failed: ${err.message}` };
+  }
+}
+
 function cleanupExpiredTokens() {
   const now = Date.now();
-  for (const [token, entry] of pendingByToken.entries()) {
-    if (now - entry.createdAt > BRIDGE_TOKEN_TTL_MS) {
-      pendingByToken.delete(token);
-      console.log(`[token] expired pending token=${token.slice(0, 12)}...`);
+  for (const [sig, entry] of pendingByToken.entries()) {
+    if (now - entry.createdAt > MEDIA_AUTH_WINDOW_MS) {
+      pendingByToken.delete(sig);
+      console.log(`[signature] expired pending signature for callSid=${entry.session?.callSid || 'unknown'}`);
     }
   }
-  for (const [token, entry] of claimedTokens.entries()) {
-    if (now - entry.createdAt > BRIDGE_TOKEN_TTL_MS) {
-      claimedTokens.delete(token);
-      console.log(`[token] expired claimed token=${token.slice(0, 12)}...`);
+  for (const [sig, entry] of claimedTokens.entries()) {
+    if (now - entry.createdAt > MEDIA_AUTH_WINDOW_MS) {
+      claimedTokens.delete(sig);
+      console.log(`[signature] expired claimed signature for callSid=${entry.session?.callSid || 'unknown'}`);
     }
   }
 }
@@ -1125,14 +1186,14 @@ function cleanupSession(session, { hangupTwilio } = { hangupTwilio: false }) {
   }
 }
 
-function buildConnectTwiml({ goal, context, voice, style, softContinue, bridgeToken }) {
+function buildConnectTwiml({ goal, context, voice, style, softContinue, callSid, timestamp, signature }) {
   if (!PUBLIC_HOST) {
     throw new Error('PUBLIC_HOST is not set (hostname only, no scheme)');
   }
-  if (!bridgeToken) {
-    throw new Error('bridgeToken is required');
+  if (!callSid || !timestamp || !signature) {
+    throw new Error('callSid, timestamp, and signature are required for HMAC auth');
   }
-  const streamUrl = `wss://${PUBLIC_HOST}/media-stream?bridgeToken=${encodeURIComponent(bridgeToken)}`;
+  const streamUrl = `wss://${PUBLIC_HOST}/media-stream?callSid=${encodeURIComponent(callSid)}&timestamp=${encodeURIComponent(timestamp)}&signature=${encodeURIComponent(signature)}`;
   const vr = new twilio.twiml.VoiceResponse();
   const connect = vr.connect();
   const stream = connect.stream({ url: streamUrl });
@@ -1142,7 +1203,10 @@ function buildConnectTwiml({ goal, context, voice, style, softContinue, bridgeTo
   if (voice) stream.parameter({ name: 'voice', value: String(voice).slice(0, 100) });
   if (style) stream.parameter({ name: 'style', value: String(style).slice(0, 40) });
   if (softContinue) stream.parameter({ name: 'softContinue', value: 'true' });
-  stream.parameter({ name: 'bridgeToken', value: bridgeToken });
+  // Store auth params in custom parameters for verification on start event
+  stream.parameter({ name: 'callSid', value: callSid });
+  stream.parameter({ name: 'timestamp', value: String(timestamp) });
+  stream.parameter({ name: 'signature', value: signature });
   return vr.toString();
 }
 
@@ -1206,7 +1270,69 @@ app.get('/health', (_req, res) => {
     styles: Object.keys(STYLE_PROFILES),
     contactConfigured: Boolean(getContact().fullName || getContact().mobile),
     authRequired: Boolean(BRIDGE_API_KEY),
+    hmacAuth: true,
   });
+});
+
+app.get('/twiml-connect', (req, res) => {
+  try {
+    const sessionId = req.query.sessionId;
+    const callSid = req.query.CallSid; // Twilio provides CallSid as query param
+
+    if (!sessionId) {
+      console.error('[twiml-connect] Missing sessionId');
+      return res.status(400).type('text/xml').send('<Response><Hangup/></Response>');
+    }
+
+    if (!callSid) {
+      console.error('[twiml-connect] Missing CallSid from Twilio');
+      return res.status(400).type('text/xml').send('<Response><Hangup/></Response>');
+    }
+
+    // Look up pending session by temp ID or real CallSid
+    let session = pendingByCallSid.get(sessionId);
+    if (!session) {
+      session = pendingByCallSid.get(callSid);
+    }
+
+    if (!session) {
+      console.error(`[twiml-connect] Session not found sessionId=${sessionId} callSid=${callSid}`);
+      return res.status(404).type('text/xml').send('<Response><Hangup/></Response>');
+    }
+
+    // Update session with real CallSid if it was created with temp ID
+    if (session.callSid !== callSid) {
+      pendingByCallSid.delete(session.callSid);
+      session.callSid = callSid;
+      pendingByCallSid.set(callSid, session);
+      sessionsByCallSid.set(callSid, session);
+    }
+
+    // Generate HMAC auth params
+    const timestamp = Date.now();
+    const signature = generateMediaAuthSignature(callSid, timestamp);
+
+    session.mediaAuthTimestamp = timestamp;
+    session.mediaAuthSignature = signature;
+    pendingByToken.set(signature, { session, createdAt: timestamp });
+
+    const twiml = buildConnectTwiml({
+      goal: session.goal,
+      context: session.context,
+      voice: session.voice,
+      style: session.style,
+      softContinue: session.softContinue,
+      callSid,
+      timestamp,
+      signature,
+    });
+
+    console.log(`[twiml-connect] Generated TwiML callSid=${callSid} ts=${timestamp}`);
+    res.type('text/xml').send(twiml);
+  } catch (err) {
+    console.error('[twiml-connect] Error:', err.message);
+    res.status(500).type('text/xml').send('<Response><Hangup/></Response>');
+  }
 });
 
 app.post('/call', requireBridgeAuth, async (req, res) => {
@@ -1226,39 +1352,41 @@ app.post('/call', requireBridgeAuth, async (req, res) => {
     const resolvedStyle = resolveStyle({ style });
     const wantSoft = Boolean(softContinue);
     
-    const bridgeToken = generateBridgeToken();
+    if (!PUBLIC_HOST) {
+      return res.status(500).json({ error: 'PUBLIC_HOST not set' });
+    }
     
-    const twiml = buildConnectTwiml({
+    // Create session with temporary ID, then update with real CallSid
+    const tempId = crypto.randomBytes(16).toString('hex');
+    const session = createSession({
+      callSid: tempId,
       goal,
       context,
       voice: resolvedVoice,
       style: resolvedStyle,
+      to,
       softContinue: wantSoft,
-      bridgeToken,
     });
-
+    pendingByCallSid.set(tempId, session);
+    
+    // Use TwiML URL endpoint so we can generate HMAC after CallSid is assigned
+    const twimlUrl = `https://${PUBLIC_HOST}/twiml-connect?sessionId=${encodeURIComponent(tempId)}`;
+    
     const call = await twilioClient.calls.create({
       to,
       from: TWILIO_FROM_NUMBER,
-      twiml,
+      url: twimlUrl,
       record: ENABLE_RECORDING,
       recordingChannels: ENABLE_RECORDING ? 'dual' : undefined,
     });
+    
+    // Update session with real CallSid
+    const callSid = call.sid;
+    session.callSid = callSid;
+    pendingByCallSid.delete(tempId);
+    pendingByCallSid.set(callSid, session);
 
-    const session = createSession({
-      callSid: call.sid,
-      goal,
-      context,
-      voice: resolvedVoice,
-      style: resolvedStyle,
-      to,
-      softContinue: wantSoft,
-    });
-    session.bridgeToken = bridgeToken;
-    pendingByCallSid.set(call.sid, session);
-    pendingByToken.set(bridgeToken, { session, createdAt: Date.now() });
-
-    console.log(`[call] placed sid=${call.sid} to=${to} style=${resolvedStyle} token=${bridgeToken.slice(0, 12)}...`);
+    console.log(`[call] placed sid=${callSid} to=${to} style=${resolvedStyle} twimlUrl=${twimlUrl}`);
     res.json({
       ok: true,
       callSid: call.sid,
@@ -1392,43 +1520,54 @@ server.on('upgrade', (req, socket, head) => {
   const path = (req.url || '').split('?')[0];
   if (path === '/media-stream') {
     const url = new URL(req.url || '', `wss://${PUBLIC_HOST || req.headers.host}`);
-    const bridgeToken = url.searchParams.get('bridgeToken');
+    const callSid = url.searchParams.get('callSid');
+    const timestamp = url.searchParams.get('timestamp');
+    const signature = url.searchParams.get('signature');
 
-    if (!bridgeToken) {
-      console.error('[media-stream] No bridgeToken in request');
+    if (!callSid || !timestamp || !signature) {
+      console.error('[media-stream] Missing required auth params (callSid, timestamp, signature)');
       socket.write('HTTP/1.1 400 Bad Request\r\n\r\n');
       socket.destroy();
       return;
     }
 
-    // 409 path: check claimed first, then pending, else 403
-    if (claimedTokens.has(bridgeToken)) {
-      console.error(`[media-stream] Token already claimed bridgeToken=${bridgeToken.slice(0, 12)}...`);
+    // Verify HMAC signature
+    const verification = verifyMediaAuthSignature(callSid, timestamp, signature);
+    if (!verification.valid) {
+      console.error(`[media-stream] HMAC verification failed: ${verification.error} callSid=${callSid}`);
+      socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
+      socket.destroy();
+      return;
+    }
+
+    // Check if signature already claimed (prevent reuse)
+    if (claimedTokens.has(signature)) {
+      console.error(`[media-stream] Signature already claimed callSid=${callSid} ts=${timestamp}`);
       socket.write('HTTP/1.1 409 Conflict\r\n\r\n');
       socket.destroy();
       return;
     }
 
-    const entry = pendingByToken.get(bridgeToken);
+    // Look up pending session by signature
+    const entry = pendingByToken.get(signature);
     if (!entry) {
-      console.error(`[media-stream] Unknown or expired bridgeToken=${bridgeToken.slice(0, 12)}...`);
+      console.error(`[media-stream] No pending session for signature callSid=${callSid} ts=${timestamp}`);
       socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
       socket.destroy();
       return;
     }
 
-    const now = Date.now();
-    if (now - entry.createdAt > BRIDGE_TOKEN_TTL_MS) {
-      pendingByToken.delete(bridgeToken);
-      console.error(`[media-stream] Expired bridgeToken=${bridgeToken.slice(0, 12)}...`);
+    // Verify CallSid matches the session
+    if (entry.session.callSid !== callSid) {
+      console.error(`[media-stream] CallSid mismatch: expected=${entry.session.callSid} actual=${callSid}`);
       socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
       socket.destroy();
       return;
     }
 
-    console.log(`[media-stream] Claiming bridgeToken=${bridgeToken.slice(0, 12)}...`);
-    claimedTokens.set(bridgeToken, entry);
-    pendingByToken.delete(bridgeToken);
+    console.log(`[media-stream] HMAC auth success callSid=${callSid} ts=${timestamp}`);
+    claimedTokens.set(signature, entry);
+    pendingByToken.delete(signature);
 
     wss.handleUpgrade(req, socket, head, (ws) => {
       wss.emit('connection', ws, req);
@@ -1442,18 +1581,19 @@ wss.on('connection', (ws, req) => {
   console.log('[twilio] media-stream websocket connected');
 
   const url = new URL(req.url || '', `wss://${PUBLIC_HOST || req.headers.host}`);
-  const bridgeToken = url.searchParams.get('bridgeToken');
+  const signature = url.searchParams.get('signature');
+  const callSid = url.searchParams.get('callSid');
 
-  if (!bridgeToken) {
-    console.error('[twilio] No bridgeToken on connection');
-    ws.close(1008, 'Missing bridgeToken');
+  if (!signature || !callSid) {
+    console.error('[twilio] Missing signature or callSid on connection');
+    ws.close(1008, 'Missing auth params');
     return;
   }
 
-  const entry = claimedTokens.get(bridgeToken);
+  const entry = claimedTokens.get(signature);
   if (!entry) {
-    console.error(`[twilio] Token not claimed bridgeToken=${bridgeToken.slice(0, 12)}...`);
-    ws.close(1008, 'Invalid bridgeToken');
+    console.error(`[twilio] Signature not claimed callSid=${callSid}`);
+    ws.close(1008, 'Invalid signature');
     return;
   }
 
@@ -1486,7 +1626,9 @@ wss.on('connection', (ws, req) => {
     if (msg.event === 'start') {
       const resolvedSid = msg.start?.callSid;
       const custom = msg.start?.customParameters || {};
-      const tokenFromCustom = custom.bridgeToken;
+      const customCallSid = custom.callSid;
+      const customTimestamp = custom.timestamp;
+      const customSignature = custom.signature;
 
       if (!resolvedSid) {
         console.error('[twilio] start event missing callSid');
@@ -1494,14 +1636,21 @@ wss.on('connection', (ws, req) => {
         return;
       }
 
-      if (tokenFromCustom && tokenFromCustom !== bridgeToken) {
-        console.error(`[twilio] bridgeToken mismatch: URL=${bridgeToken.slice(0, 12)}... custom=${tokenFromCustom.slice(0, 12)}...`);
-        ws.close(1008, 'Token mismatch');
+      // Verify custom parameters match URL parameters (defense in depth)
+      if (customCallSid && customCallSid !== callSid) {
+        console.error(`[twilio] callSid mismatch: URL=${callSid} custom=${customCallSid}`);
+        ws.close(1008, 'CallSid parameter mismatch');
+        return;
+      }
+
+      if (customSignature && customSignature !== signature) {
+        console.error(`[twilio] signature mismatch: URL vs custom parameters`);
+        ws.close(1008, 'Signature parameter mismatch');
         return;
       }
 
       if (session.callSid !== resolvedSid) {
-        console.error(`[twilio] CallSid mismatch: expected=${session.callSid} actual=${resolvedSid} token=${bridgeToken.slice(0, 12)}...`);
+        console.error(`[twilio] CallSid mismatch: expected=${session.callSid} actual=${resolvedSid}`);
         ws.close(1008, 'CallSid mismatch');
         return;
       }
@@ -1520,7 +1669,7 @@ wss.on('connection', (ws, req) => {
       }
 
       pendingByCallSid.delete(resolvedSid);
-      claimedTokens.delete(bridgeToken);
+      claimedTokens.delete(signature);
 
       session.twilioWs = ws;
       session.streamSid = msg.start?.streamSid || msg.streamSid;
@@ -1530,7 +1679,7 @@ wss.on('connection', (ws, req) => {
 
       boundToCallSid = true;
       console.log(
-        `[twilio] bound token=${bridgeToken.slice(0, 12)}... to callSid=${resolvedSid} streamSid=${session.streamSid} style=${session.style || 'support'}`
+        `[twilio] bound HMAC auth to callSid=${resolvedSid} streamSid=${session.streamSid} style=${session.style || 'support'}`
       );
 
       openGrokSession(session);
@@ -1558,17 +1707,17 @@ wss.on('connection', (ws, req) => {
         session.grokWs = null;
       }
     }
-    if (bridgeToken) {
-      const originalEntry = claimedTokens.get(bridgeToken);
-      claimedTokens.delete(bridgeToken);
-      // Token DoS mitigation: restore token to pending if never bound to CallSid.
-      // This prevents leaked token connect/disconnect loops from burning the real stream.
+    if (signature) {
+      const originalEntry = claimedTokens.get(signature);
+      claimedTokens.delete(signature);
+      // Signature DoS mitigation: restore signature to pending if never bound to CallSid.
+      // This prevents leaked signature connect/disconnect loops from burning the real stream.
       // Preserve original createdAt so TTL countdown is not reset on burn attempts.
       if (!boundToCallSid && session) {
         const originalCreatedAt = originalEntry?.createdAt || Date.now();
         const entry = { session, createdAt: originalCreatedAt };
-        pendingByToken.set(bridgeToken, entry);
-        console.log(`[token] restored to pending (not bound) token=${bridgeToken.slice(0, 12)}... preserving original TTL`);
+        pendingByToken.set(signature, entry);
+        console.log(`[signature] restored to pending (not bound) callSid=${callSid} preserving original TTL`);
       }
     }
   });
