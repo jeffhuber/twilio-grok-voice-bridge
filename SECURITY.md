@@ -16,25 +16,19 @@ All control-plane routes (`/call`, `/steer`, `/hangup`, `/voice`, `/transcript`)
 
 ### 2. Media Stream WebSocket Security
 
-**HMAC-SHA256 signatures (NEW):**
+**HMAC-SHA256 signature authentication:**
 - Cryptographically signed authentication using `BRIDGE_API_KEY` as secret
 - Signatures computed over `callSid:timestamp`, preventing forgery
 - Unforgeable: requires knowledge of `BRIDGE_API_KEY` to generate valid signatures
-- Late mint at `/twiml-connect`: signature created only when Twilio fetches TwiML, not at call creation
+- Signature generated at `/twiml-connect` when Twilio fetches TwiML
 - CallSid cryptographically bound into MAC
 - Time-limited: signatures expire after `MEDIA_AUTH_WINDOW_MS` (default 2 minutes)
 - Constant-time comparison uses `crypto.timingSafeEqual` to prevent timing attacks
 
-**Single-use claim (INHERITED from main):**
+**Single-use claim:**
 - Signatures can only be claimed once; duplicate attempts return 409 Conflict
 - CallSid binding: expected CallSid is frozen at session creation; mismatches close the WebSocket immediately
 - Signature DoS mitigation: unclaimed signatures are restored to pending with preserved TTL to prevent burn loops
-
-**Key improvements over previous bearer token:**
-1. **Unforgeability:** Bearer tokens were random; HMAC signatures require secret key
-2. **CallSid-in-MAC:** CallSid is cryptographically bound to signature; tampering invalidates it
-3. **Late mint:** Signature generated at TwiML fetch time, not call creation (tighter window)
-4. **Signature invalidation:** Old signatures invalidated on `/twiml-connect` retry (prevents multi-sig accumulation)
 
 ### 3. Session Lifecycle Management
 
@@ -118,24 +112,19 @@ Use `.env` (gitignored) or secret management systems in production.
 - **xAI API key compromise:** Direct xAI Realtime API calls (bypassing Twilio)
 - **Network-level attacks:** DDoS, SSL/TLS attacks (mitigate at edge/load balancer)
 
-### HMAC vs Bearer Token Security Comparison
+### Security Properties
 
-**Main branch already had:**
-- ✅ Single-use claim (tokens/signatures claimed once, 409 on replay)
-- ✅ CallSid binding (session frozen to CallSid)
-- ✅ DoS mitigation (burned tokens/signatures restored to pending)
+The HMAC-based authentication provides:
+- ✅ **Unforgeability:** Signatures cannot be generated without `BRIDGE_API_KEY`
+- ✅ **Cryptographic binding:** CallSid is bound into the signature; tampering invalidates it
+- ✅ **Time-limited:** Signatures expire after `MEDIA_AUTH_WINDOW_MS` (default 2 minutes)
+- ✅ **Single-use:** Signatures can only be claimed once
+- ✅ **X-Twilio-Signature validation:** `/twiml-connect` protected when `TWILIO_AUTH_TOKEN` is set
 
-**NEW with HMAC (real improvements):**
-- ✅ **Unforgeability:** HMAC requires `BRIDGE_API_KEY`; bearer tokens were just random bytes
-- ✅ **CallSid-in-MAC:** CallSid cryptographically bound; tampering invalidates signature (bearer had no cryptographic binding)
-- ✅ **Late mint:** Signature generated at `/twiml-connect` fetch, not call creation (tighter window)
-- ✅ **Signature invalidation:** Old signatures dropped on retry; bearer approach accumulated multiple valid tokens on retry
-- ✅ **X-Twilio-Signature validation:** `/twiml-connect` protected against sessionId theft (when `TWILIO_AUTH_TOKEN` set)
-
-**Both approaches share:**
-- ⚠️ Stolen URL + forged `start.callSid` can bind within TTL (single-use only)
-- ⚠️ Require `BRIDGE_API_KEY` / secret key for security
-- ⚠️ In-memory state (sticky/single-node deployment required)
+**Deployment requirements:**
+- Requires `BRIDGE_API_KEY` to be set for signature generation
+- Sticky/single-node deployment required (in-memory state)
+- HTTPS/WSS required for Twilio Media Streams
 
 ## Known Limitations
 
@@ -149,7 +138,7 @@ Use `.env` (gitignored) or secret management systems in production.
 
 | Date | Version | Changes |
 |------|---------|---------|
-| 2026-09-12 | HMAC Auth | Replaced bearer token with HMAC-SHA256 signature-based media stream auth; cryptographic binding to CallSid+timestamp; non-replayable signatures |
-| 2026-09-11 | Batch B | Crash containment, session GC, qs audit fix, duplicate stream prevention |
-| 2026-09-10 | Batch A | CallSid bind, token claim, BRIDGE_API_KEY auth |
-| 2026-09-09 | Initial | Proof-of-concept public release |
+| 2026-09-12 | v1.2 | HMAC-SHA256 signature-based media stream auth with cryptographic CallSid binding |
+| 2026-09-11 | v1.1 | Crash containment, session GC, qs audit fix, duplicate stream prevention |
+| 2026-09-10 | v1.0 | Initial security hardening: CallSid bind, signature claim, BRIDGE_API_KEY auth |
+| 2026-09-09 | v0.1 | Proof-of-concept public release |
