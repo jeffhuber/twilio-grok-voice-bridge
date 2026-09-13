@@ -147,8 +147,8 @@ The bridge accepts either header:
 ### Auth policy
 
 - **BRIDGE_API_KEY set:** operator routes require the key (401 JSON `{ error: "unauthorized" }` on miss/mismatch).
-- **REQUIRE_BRIDGE_AUTH=1 + no key:** server exits on startup.
-- **No key, no REQUIRE flag:** server starts with a loud warning; operator routes are OPEN (dev/localhost only).
+- **No BRIDGE_API_KEY:** operator routes return 401 unless `ALLOW_UNAUTHENTICATED_OPERATOR=1` is set (server exits on startup without this escape hatch).
+- **ALLOW_UNAUTHENTICATED_OPERATOR=1:** server starts with a loud warning; operator routes are OPEN (localhost demos only — never use for shared/public deployments).
 
 ### Recording and Disclosure
 
@@ -176,7 +176,7 @@ For public hosts, **always** use one of:
 | PORT | HTTP listen port (default 3000) |
 | PUBLIC_HOST | Public hostname for media-stream WSS (no scheme) |
 | BRIDGE_API_KEY | **REQUIRED:** Shared secret for operator routes (Bearer or X-Bridge-Key) AND HMAC signing key for media stream auth. Without it, `/twiml-connect` returns 500 and calls fail. |
-| REQUIRE_BRIDGE_AUTH | Set to `1` to exit on startup if BRIDGE_API_KEY is missing |
+| ALLOW_UNAUTHENTICATED_OPERATOR | Set to `1` to bypass auth when BRIDGE_API_KEY is unset (localhost demos only — never use for shared/public deployments). Server exits on startup if BRIDGE_API_KEY is missing and this is not set. |
 | MEDIA_AUTH_WINDOW_MS | HMAC signature validity window in milliseconds (default 120000 = 2 minutes) |
 | SESSION_MAX_AGE_MS | Maximum session age before GC in milliseconds (default 7200000 = 2 hours) |
 | ENABLE_RECORDING | Set to `1` to enable dual-channel call recording (default off) |
