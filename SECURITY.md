@@ -125,6 +125,16 @@ Use `.env` (gitignored) or secret management systems in production.
   - Monitor Twilio billing for unexpected usage
   - Add additional controls: IP allowlists, Cloudflare Access, etc.
 
+**Operator/bridge logs contain call metadata and transcript snippets:**
+- Bridge stdout logs include destination numbers (`to=`) and partial transcript content (~120 chars per log line) for operational visibility
+- **Risk:** Pasting bridge or Twilio operator logs into public channels (chat, gist, GitHub issues) leaks:
+  - Call destination numbers
+  - Portions of conversation transcripts (PII, PHI, or sensitive content)
+- **Mitigations:**
+  - Do not paste raw operator/bridge/Twilio logs into public or semi-public channels
+  - Redact `to=` and transcript fields before sharing logs
+  - Use private support channels or direct communications when sharing diagnostic output
+
 **Out of scope:**
 - **Twilio account compromise:** If Twilio credentials are stolen, attackers can place calls directly via Twilio API (bypassing this bridge entirely)
 - **xAI API key compromise:** Direct xAI Realtime API calls (bypassing Twilio)
