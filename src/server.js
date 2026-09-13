@@ -1212,6 +1212,14 @@ const app = express();
 app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: true }));
 
+app.use((err, req, res, next) => {
+  if (err.type === 'entity.too.large' || err.status === 413 || err.statusCode === 413) {
+    console.log('[http] 413 payload too large');
+    return res.status(413).json({ error: 'payload too large' });
+  }
+  next(err);
+});
+
 function requireBridgeAuth(req, res, next) {
   if (!BRIDGE_API_KEY) {
     if (ALLOW_UNAUTHENTICATED_OPERATOR) {
