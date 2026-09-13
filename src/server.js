@@ -21,7 +21,7 @@ const TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN;
 const TWILIO_FROM_NUMBER = process.env.TWILIO_FROM_NUMBER;
 const XAI_API_KEY = process.env.XAI_API_KEY;
 const BRIDGE_API_KEY = process.env.BRIDGE_API_KEY;
-const REQUIRE_BRIDGE_AUTH = process.env.REQUIRE_BRIDGE_AUTH === '1';
+const ALLOW_UNAUTHENTICATED_OPERATOR = process.env.ALLOW_UNAUTHENTICATED_OPERATOR === '1';
 const ENABLE_RECORDING = process.env.ENABLE_RECORDING === '1';
 const SKIP_AI_DISCLOSURE = process.env.SKIP_AI_DISCLOSURE === '1';
 
@@ -236,7 +236,7 @@ function buildRestaurantBookCoaching() {
     '## Role & opener (CRITICAL)',
     `You are calling to make a restaurant reservation${c.fullName ? ` on behalf of ${c.fullName}` : ' (see goal/context for whose name)'}.`,
     'Open naturally — e.g. "Hi, I\'d like to make a reservation for tonight" — like a person booking dinner.',
-    'NEVER say you are customer support, an AI, or "an assistant calling from customer support."',
+    'Do NOT claim to be restaurant staff customer support or "calling from the restaurant." You are the caller making a booking.',
     c.fullName
       ? `You may say you are calling for ${c.fullName} / booking for ${c.fullName}'s party once name is needed.`
       : 'Once name is needed, use ONLY a name present in the goal/context or CONTACT_FULL_NAME — never invent.',
@@ -277,17 +277,19 @@ if (!TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN || !TWILIO_FROM_NUMBER) {
 if (!XAI_API_KEY) {
   console.warn('[warn] XAI_API_KEY missing — media-stream bridge will fail until set');
 }
-if (REQUIRE_BRIDGE_AUTH && !BRIDGE_API_KEY) {
-  console.error('[error] REQUIRE_BRIDGE_AUTH=1 but BRIDGE_API_KEY is not set — server will refuse operator routes and HMAC auth will fail');
+if (!BRIDGE_API_KEY && !ALLOW_UNAUTHENTICATED_OPERATOR) {
+  console.error('[error] BRIDGE_API_KEY is not set and ALLOW_UNAUTHENTICATED_OPERATOR is not enabled.');
+  console.error('[error] For shared/public deployments, BRIDGE_API_KEY is required to protect operator routes.');
+  console.error('[error] For localhost demos only, set ALLOW_UNAUTHENTICATED_OPERATOR=1 to bypass auth.');
   process.exit(1);
 }
-if (!BRIDGE_API_KEY) {
+if (!BRIDGE_API_KEY && ALLOW_UNAUTHENTICATED_OPERATOR) {
   console.warn('');
-  console.warn('[SECURITY WARNING] BRIDGE_API_KEY is not set!');
+  console.warn('[SECURITY WARNING] ALLOW_UNAUTHENTICATED_OPERATOR=1 is set WITHOUT BRIDGE_API_KEY!');
   console.warn('[SECURITY WARNING] Operator control-plane routes (/call, /steer, /hangup, /voice, /transcript) are UNPROTECTED.');
   console.warn('[SECURITY WARNING] Media stream HMAC authentication is DISABLED (will fall back to weaker auth).');
   console.warn('[SECURITY WARNING] Anyone who can reach this host can spend your Twilio account and xAI credits.');
-  console.warn('[SECURITY WARNING] Set BRIDGE_API_KEY or put this server behind Cloudflare Access / localhost-only.');
+  console.warn('[SECURITY WARNING] This mode is ONLY for localhost demos. Use BRIDGE_API_KEY for any shared/public deployment.');
   console.warn('');
 }
 
@@ -1212,10 +1214,10 @@ app.use(express.urlencoded({ extended: true }));
 
 function requireBridgeAuth(req, res, next) {
   if (!BRIDGE_API_KEY) {
-    if (REQUIRE_BRIDGE_AUTH) {
-      return res.status(401).json({ error: 'unauthorized' });
+    if (ALLOW_UNAUTHENTICATED_OPERATOR) {
+      return next();
     }
-    return next();
+    return res.status(401).json({ error: 'unauthorized' });
   }
 
   const authHeader = req.headers.authorization || '';
@@ -1407,6 +1409,9 @@ app.post('/call', requireBridgeAuth, async (req, res) => {
     session.callSid = callSid;
     pendingByCallSid.delete(tempId);
     pendingByCallSid.set(callSid, session);
+    // Also remap sessionsByCallSid so /hangup and /steer work before /twiml-connect
+    sessionsByCallSid.delete(tempId);
+    sessionsByCallSid.set(callSid, session);
 
     const redactedTwimlUrl = `https://${PUBLIC_HOST}/twiml-connect?sessionId=${tempId.slice(0, 8)}...`;
     console.log(`[call] placed sid=${callSid} to=${to} style=${resolvedStyle} twimlUrl=${redactedTwimlUrl}`);
