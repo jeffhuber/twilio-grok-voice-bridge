@@ -32,7 +32,7 @@ All control-plane routes (`/call`, `/steer`, `/hangup`, `/voice`, `/transcript`)
 - CallSid binding: expected CallSid is frozen at session creation; mismatches close the WebSocket immediately
 - Signature DoS mitigation: unclaimed signatures are restored to pending with preserved TTL to prevent burn loops
 
-### 5. Session Lifecycle Management
+### 3. Session Lifecycle Management
 
 - **Crash containment:** All WebSocket JSON parsing is wrapped with defensive validation; null/malformed frames never crash the process
 - **Garbage collection:** Orphan sessions (both WebSockets closed) and sessions exceeding `SESSION_MAX_AGE_MS` (default 2 hours) are automatically cleaned up every 2 minutes
