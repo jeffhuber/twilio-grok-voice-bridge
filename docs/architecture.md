@@ -46,7 +46,7 @@ A laptop-only `localhost` listener is unreachable. Use:
 
 1. Operator `POST /call` with `to` + `goal` (+ optional style/voice/context).
 2. Bridge creates a Twilio call with TwiML `<Connect><Stream url="wss://PUBLIC_HOST/media-stream">`.
-3. Dual-channel recording flags are set on create (`record: true`, `recordingChannels: dual`).
+3. Dual-channel recording is opt-in (default off; set `ENABLE_RECORDING=1` to enable).
 4. Twilio upgrades to `/media-stream`; bridge opens Grok Voice realtime and sends `session.update`
    (voice, instructions, server VAD, PCMU in/out).
 5. Audio frames forward both ways; transcripts accumulate on the session.
