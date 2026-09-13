@@ -287,7 +287,7 @@ if (!BRIDGE_API_KEY && ALLOW_UNAUTHENTICATED_OPERATOR) {
   console.warn('');
   console.warn('[SECURITY WARNING] ALLOW_UNAUTHENTICATED_OPERATOR=1 is set WITHOUT BRIDGE_API_KEY!');
   console.warn('[SECURITY WARNING] Operator control-plane routes (/call, /steer, /hangup, /voice, /transcript) are UNPROTECTED.');
-  console.warn('[SECURITY WARNING] Media stream HMAC authentication is DISABLED (will fall back to weaker auth).');
+  console.warn('[SECURITY WARNING] Media stream HMAC authentication is UNAVAILABLE — signature minting will fail and calls will break.');
   console.warn('[SECURITY WARNING] Anyone who can reach this host can spend your Twilio account and xAI credits.');
   console.warn('[SECURITY WARNING] This mode is ONLY for localhost demos. Use BRIDGE_API_KEY for any shared/public deployment.');
   console.warn('');
@@ -1359,6 +1359,7 @@ app.all('/twiml-connect', (req, res) => {
 });
 
 app.post('/call', requireBridgeAuth, async (req, res) => {
+  let tempId = null;
   try {
     const { to, goal, context, voice, style, softContinue } = req.body || {};
     if (!to || !goal) {
@@ -1380,7 +1381,7 @@ app.post('/call', requireBridgeAuth, async (req, res) => {
     }
     
     // Create session with temporary ID, then update with real CallSid
-    const tempId = crypto.randomBytes(16).toString('hex');
+    tempId = crypto.randomBytes(16).toString('hex');
     const session = createSession({
       callSid: tempId,
       goal,
@@ -1429,6 +1430,11 @@ app.post('/call', requireBridgeAuth, async (req, res) => {
     });
   } catch (err) {
     console.error('[call] error:', err.message);
+    // Clean up tempId from maps to avoid leak until GC
+    if (tempId) {
+      pendingByCallSid.delete(tempId);
+      sessionsByCallSid.delete(tempId);
+    }
     res.status(500).json({ error: err.message });
   }
 });

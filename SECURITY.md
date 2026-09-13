@@ -14,6 +14,8 @@ All control-plane routes (`/call`, `/steer`, `/hangup`, `/voice`, `/transcript`)
 
 **Required:** Set `BRIDGE_API_KEY` to a strong random secret (32+ bytes) before deploying publicly.
 
+**Fail-closed by default:** If `BRIDGE_API_KEY` is not set, the server exits on startup unless the explicit escape hatch `ALLOW_UNAUTHENTICATED_OPERATOR=1` is set. The escape hatch is intended ONLY for localhost demos and displays loud security warnings on startup. Never deploy publicly with `ALLOW_UNAUTHENTICATED_OPERATOR=1`.
+
 ### 2. Media Stream WebSocket Security
 
 **HMAC-SHA256 signature authentication:**
@@ -54,8 +56,8 @@ Use `.env` (gitignored) or secret management systems in production.
 
 ## Production Deployment Checklist
 
-- [ ] Set `BRIDGE_API_KEY` to a strong random secret
-- [ ] Set `REQUIRE_BRIDGE_AUTH=1` to enforce auth on startup
+- [ ] Set `BRIDGE_API_KEY` to a strong random secret (required - server exits on startup without it)
+- [ ] Ensure `ALLOW_UNAUTHENTICATED_OPERATOR` is NOT set (fail-closed by default; only use `=1` for localhost demos)
 - [ ] Enable HTTPS/WSS (Twilio Media Streams require WSS)
 - [ ] Configure `SESSION_MAX_AGE_MS` for your use case (default 2 hours)
 - [ ] Review AI disclosure requirements for your jurisdiction
