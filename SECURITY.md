@@ -39,7 +39,23 @@ All control-plane routes (`/call`, `/steer`, `/hangup`, `/voice`, `/transcript`)
 - **One stream per CallSid:** Duplicate active streams for the same CallSid are rejected to prevent resource exhaustion
 - **Duplicate start protection:** After CallSid bind, duplicate `start` events are ignored to prevent parameter re-injection
 
-### 4. Dependency Security
+### 4. Body Parser Error Handling
+
+**Filesystem path leak prevention:**
+- Body parsing runs before authentication middleware (Express architectural constraint)
+- All body-parser errors (malformed JSON, encoding errors, oversized payloads) are caught by custom error middleware
+- Returns safe JSON responses without exposing filesystem paths, stack traces, or HTML error pages
+- Production-safe Express configuration (`app.set('env', 'production')`) prevents default error page leakage
+- `x-powered-by` header disabled to avoid version disclosure
+
+**Error responses:**
+- Malformed JSON/urlencoded body → `400 {"error": "invalid request body"}`
+- Oversized payload → `413 {"error": "payload too large"}`
+- Unexpected errors → `500 {"error": "internal server error"}`
+
+**Testing:** Run `scripts/test-body-parser-safety.sh` to verify body-parser errors don't leak paths.
+
+### 5. Dependency Security
 
 - **npm audit:** All known vulnerabilities are resolved via `npm audit fix` or dependency overrides
 - **qs override:** Uses `qs@^6.16.0` to patch CVE-2026-82417 (isBuffer DoS) and CVE-2026-82562 (comma-arrayLimit bypass) in express transitive dependencies
@@ -150,6 +166,7 @@ The HMAC-based authentication provides:
 
 | Date | Version | Changes |
 |------|---------|---------|
+| 2026-09-13 | v1.3 | Body-parser error handling hardening: prevent filesystem path leakage on malformed JSON |
 | 2026-09-12 | v1.2 | HMAC-SHA256 signature-based media stream auth with cryptographic CallSid binding |
 | 2026-09-11 | v1.1 | Crash containment, session GC, qs audit fix, duplicate stream prevention |
 | 2026-09-10 | v1.0 | Initial security hardening: CallSid bind, signature claim, BRIDGE_API_KEY auth |

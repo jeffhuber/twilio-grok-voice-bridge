@@ -1209,14 +1209,43 @@ function buildConnectTwiml({ goal, context, voice, style, softContinue, callSid,
 
 // ─── HTTP + WS server ───────────────────────────────────────────────
 const app = express();
+
+// Production-safe Express: disable stack traces and x-powered-by header
+// even in development to prevent accidental path leakage
+app.disable('x-powered-by');
+app.set('env', 'production');
+
 app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: true }));
 
+// Body-parser error handler: catch all JSON/urlencoded parse errors
+// BEFORE they reach Express's default handler (which can leak filesystem paths)
 app.use((err, req, res, next) => {
+  // Handle oversized payloads
   if (err.type === 'entity.too.large' || err.status === 413 || err.statusCode === 413) {
     console.log('[http] 413 payload too large');
     return res.status(413).json({ error: 'payload too large' });
   }
+
+  // Handle all other body-parser errors (JSON parse, encoding, etc.)
+  // without exposing filesystem paths or stack traces
+  if (
+    err.type === 'entity.parse.failed' ||
+    err.status === 400 ||
+    err.statusCode === 400 ||
+    (err instanceof SyntaxError && 'body' in err)
+  ) {
+    console.log(`[http] 400 body parse error: ${err.message}`);
+    return res.status(400).json({ error: 'invalid request body' });
+  }
+
+  // Catch any other middleware errors and return safe generic response
+  // Never expose stack traces, require.main paths, or filesystem details
+  if (err) {
+    console.error('[http] unexpected error:', err.message);
+    return res.status(500).json({ error: 'internal server error' });
+  }
+
   next(err);
 });
 
