@@ -8,13 +8,19 @@ on:
     branches:
       - main
 
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     
     steps:
       - name: Checkout code
         uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+        with:
+          persist-credentials: false
       
       - name: Setup Node.js
         uses: actions/setup-node@60edb5dd545a775178f52524783378180af0d1f8 # v4.0.2
@@ -39,8 +45,8 @@ jobs:
       
       - name: Run body-parser safety test
         env:
-          BRIDGE_API_KEY: 'ci-test-not-a-real-secret'
-          PUBLIC_HOST: 'localhost:3000'
+          BRIDGE_API_KEY: ci-test-key-not-a-secret
+          PUBLIC_HOST: localhost:3000
         run: |
           echo "=== Starting server for body-parser safety test ==="
           # Start server in background
