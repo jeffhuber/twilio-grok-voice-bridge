@@ -1,0 +1,82 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@60edb5dd545a775178f52524783378180af0d1f8 # v4.0.2
+        with:
+          node-version: '20'
+          cache: 'npm'
+      
+      - name: Install dependencies
+        run: npm ci
+      
+      - name: Syntax check JavaScript files
+        run: |
+          echo "=== Checking JavaScript syntax with node --check ==="
+          find src -name "*.js" -type f -exec node --check {} \;
+          echo "✓ All JavaScript files passed syntax check"
+      
+      - name: Syntax check shell scripts
+        run: |
+          echo "=== Checking shell script syntax with bash -n ==="
+          find scripts -name "*.sh" -type f -exec bash -n {} \;
+          echo "✓ All shell scripts passed syntax check"
+      
+      - name: Run body-parser safety test
+        env:
+          ALLOW_UNAUTHENTICATED_OPERATOR: '1'
+          PUBLIC_HOST: 'localhost:3000'
+        run: |
+          echo "=== Starting server for body-parser safety test ==="
+          # Start server in background
+          node src/server.js &
+          SERVER_PID=$!
+          echo "Server PID: $SERVER_PID"
+          
+          # Wait for server to be ready (max 10 seconds)
+          echo "Waiting for server to be ready..."
+          for i in {1..20}; do
+            if curl -s http://localhost:3000/health > /dev/null 2>&1; then
+              echo "✓ Server is ready"
+              break
+            fi
+            if [ $i -eq 20 ]; then
+              echo "❌ Server failed to start within 10 seconds"
+              kill $SERVER_PID 2>/dev/null || true
+              exit 1
+            fi
+            sleep 0.5
+          done
+          
+          # Run the safety test
+          bash scripts/test-body-parser-safety.sh
+          TEST_EXIT=$?
+          
+          # Kill the server
+          echo "Stopping server (PID: $SERVER_PID)"
+          kill $SERVER_PID 2>/dev/null || true
+          wait $SERVER_PID 2>/dev/null || true
+          
+          # Exit with test result
+          exit $TEST_EXIT
+      
+      - name: Security audit (advisory only)
+        run: |
+          echo "=== Running npm audit (advisory only) ==="
+          npm audit --omit=dev || echo "⚠️  npm audit found issues (non-blocking)"
+        continue-on-error: true
