@@ -39,7 +39,7 @@ jobs:
       
       - name: Run body-parser safety test
         env:
-          ALLOW_UNAUTHENTICATED_OPERATOR: '1'
+          BRIDGE_API_KEY: 'ci-test-not-a-real-secret'
           PUBLIC_HOST: 'localhost:3000'
         run: |
           echo "=== Starting server for body-parser safety test ==="
