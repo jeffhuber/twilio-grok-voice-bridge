@@ -55,11 +55,14 @@ echo ""
 
 # Test 2: Oversized body without auth → should return 413 JSON
 echo "Test 2: Oversized body POST to /call (no auth)"
-LARGE_PAYLOAD=$(printf '{"goal": "%s"}' "$(head -c 2000000 /dev/zero | tr '\0' 'x')")
+# Use 1.2MB payload (exceeds 1MB limit) via temp file to avoid shell arg limits
+TEMP_PAYLOAD=$(mktemp)
+printf '{"goal": "%s"}' "$(head -c 1200000 /dev/zero | tr '\0' 'x')" > "$TEMP_PAYLOAD"
 RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
   "$SERVER_URL/call" \
   -H "Content-Type: application/json" \
-  -d "$LARGE_PAYLOAD" 2>&1 || true)
+  --data-binary "@$TEMP_PAYLOAD" 2>&1 || true)
+rm -f "$TEMP_PAYLOAD"
 
 HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
 BODY=$(echo "$RESPONSE" | head -n-1)
@@ -71,7 +74,8 @@ echo "  Response body: $BODY"
 if [[ "$HTTP_CODE" == "413" ]]; then
   echo "  ✓ PASS: Correct 413 status"
 else
-  echo "  ⚠️  Expected 413, got $HTTP_CODE (may fail before reaching server)"
+  echo "  ❌ FAIL: Expected 413, got $HTTP_CODE (may fail before reaching server)"
+  FAIL=1
 fi
 
 # Check for leaked paths even on 413
@@ -100,7 +104,8 @@ echo "  Response body: $BODY"
 if [[ "$HTTP_CODE" == "401" ]]; then
   echo "  ✓ PASS: Correct 401 unauthorized"
 else
-  echo "  ⚠️  Expected 401, got $HTTP_CODE"
+  echo "  ❌ FAIL: Expected 401, got $HTTP_CODE"
+  FAIL=1
 fi
 
 # Check for leaked paths
