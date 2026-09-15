@@ -70,6 +70,17 @@ Sensitive environment variables should never be committed:
 
 Use `.env` (gitignored) or secret management systems in production.
 
+## Spending and Rate Controls
+
+**Operator responsibility:**
+- This bridge does NOT implement rate limiting or spending caps for Twilio calls or xAI API usage
+- **Twilio:** Configure billing alerts and rate limits in the [Twilio Console](https://console.twilio.com) under Account → Usage → Alerts
+- **xAI:** Monitor API usage and set up alerts through your xAI dashboard or billing settings
+- For production deployments, consider adding:
+  - IP allowlists or VPN-only access to operator routes
+  - Additional middleware for per-user or per-hour call limits
+  - Budget alerting via cloud provider notifications (AWS Budget, GCP Billing Alerts, etc.)
+
 ## Production Deployment Checklist
 
 - [ ] Set `BRIDGE_API_KEY` to a strong random secret (required - server exits on startup without it)
@@ -78,7 +89,9 @@ Use `.env` (gitignored) or secret management systems in production.
 - [ ] Configure `SESSION_MAX_AGE_MS` for your use case (default 2 hours)
 - [ ] Review AI disclosure requirements for your jurisdiction
 - [ ] Enable recording only if required (`ENABLE_RECORDING=1`) and comply with consent laws
+- [ ] Keep `LOG_TRANSCRIPTS` disabled (default) unless actively debugging
 - [ ] Use Cloudflare Access, VPN, or IP allowlists for additional access control
+- [ ] Configure Twilio billing alerts and rate limits in Twilio Console
 - [ ] Monitor logs for suspicious activity (token reuse, CallSid mismatches, parse errors)
 
 ## Threat Model & Residual Risks
@@ -125,15 +138,22 @@ Use `.env` (gitignored) or secret management systems in production.
   - Monitor Twilio billing for unexpected usage
   - Add additional controls: IP allowlists, Cloudflare Access, etc.
 
-**Operator/bridge logs contain call metadata and transcript snippets:**
-- Bridge stdout logs include destination numbers (`to=`) and partial transcript content (~120 chars per log line) for operational visibility
-- **Risk:** Pasting bridge or Twilio operator logs into public channels (chat, gist, GitHub issues) leaks:
-  - Call destination numbers
-  - Portions of conversation transcripts (PII, PHI, or sensitive content)
+**Operator/bridge logs contain call metadata (privacy defaults enabled):**
+- **Default privacy protections:**
+  - Destination phone numbers are **masked by default** (last 4 digits shown: `xxxx1234`)
+  - Transcript content is **not logged by default** (set `LOG_TRANSCRIPTS=1` to enable)
+  - Set `LOG_TRANSCRIPTS=1` to explicitly enable transcript logging for debugging
+- Bridge stdout logs include masked destination numbers and (when enabled) partial transcript content (~120 chars per log line) for operational visibility
+- **Risk:** Pasting bridge or Twilio operator logs into public channels (chat, gist, GitHub issues) may leak:
+  - Last 4 digits of call destination numbers (even with masking)
+  - Portions of conversation transcripts (PII, PHI, or sensitive content) if `LOG_TRANSCRIPTS=1`
+  - Twilio logs (when `ENABLE_RECORDING=1`) contain full phone numbers and audio URLs
 - **Mitigations:**
   - Do not paste raw operator/bridge/Twilio logs into public or semi-public channels
-  - Redact `to=` and transcript fields before sharing logs
+  - Redact any remaining phone digits and transcript fields before sharing logs
   - Use private support channels or direct communications when sharing diagnostic output
+  - Keep `LOG_TRANSCRIPTS` disabled (default) unless actively debugging
+  - Review Twilio logs separately for unmasked phone numbers and recording URLs
 
 **Out of scope:**
 - **Twilio account compromise:** If Twilio credentials are stolen, attackers can place calls directly via Twilio API (bypassing this bridge entirely)
@@ -164,10 +184,11 @@ The HMAC-based authentication provides:
 
 ## Audit History
 
-| Date | Version | Changes |
-|------|---------|---------|
-| 2026-09-13 | v1.3 | Body-parser error handling hardening: prevent filesystem path leakage on malformed JSON |
-| 2026-09-12 | v1.2 | HMAC-SHA256 signature-based media stream auth with cryptographic CallSid binding |
-| 2026-09-11 | v1.1 | Crash containment, session GC, qs audit fix, duplicate stream prevention |
-| 2026-09-10 | v1.0 | Initial security hardening: CallSid bind, signature claim, BRIDGE_API_KEY auth |
-| 2026-09-09 | v0.1 | Proof-of-concept public release |
+| Date | Changes |
+|------|---------|
+| 2026-09-15 | Privacy defaults: phone number masking (last 4 only), transcript logging opt-in (LOG_TRANSCRIPTS=0 default) |
+| 2026-09-13 | Body-parser error handling hardening: prevent filesystem path leakage on malformed JSON |
+| 2026-09-12 | HMAC-SHA256 signature-based media stream auth with cryptographic CallSid binding |
+| 2026-09-11 | Crash containment, session GC, qs audit fix, duplicate stream prevention |
+| 2026-09-10 | Initial security hardening: CallSid bind, signature claim, BRIDGE_API_KEY auth |
+| 2026-09-09 | Proof-of-concept public release |
