@@ -90,7 +90,7 @@ The `/media-stream` WebSocket endpoint uses **HMAC-SHA256 signature-based authen
 5. On WebSocket upgrade, the bridge:
    - Verifies the HMAC signature using constant-time comparison
    - Checks timestamp is within `MEDIA_AUTH_WINDOW_MS` (default 2 minutes)
-   - Ensures the signature hasn't been claimed before (prevents replay)
+   - Checks signature hasn't been claimed before within this process instance (mitigates replay)
    - Validates CallSid matches the pending session
 6. **Signature claim:** On upgrade, the signature is atomically moved from pending to claimed state. Second upgrade attempts with the same signature are rejected with 409 Conflict.
 7. On Twilio's `start` event, the bridge verifies:
@@ -98,10 +98,10 @@ The `/media-stream` WebSocket endpoint uses **HMAC-SHA256 signature-based authen
    - Custom parameters match URL parameters (prevents parameter injection)
 8. Only after HMAC verification + CallSid binding succeeds does the bridge open the xAI Realtime WebSocket
 
-**This prevents:**
-- **Replay attacks:** Signatures are single-use and time-limited (default 2 minutes)
-- **Token leakage:** Even if a signature is intercepted, it's bound to a specific CallSid and timestamp
-- **Bearer token weakness:** Unlike bare tokens, HMAC signatures cannot be forged without knowing `BRIDGE_API_KEY`
+**This mitigates:**
+- **Replay attacks:** Signatures are single-use within a process instance and time-limited (default 2 minutes)
+- **Token leakage:** Signatures are bound to a specific CallSid and timestamp
+- **Bearer token weakness:** HMAC signatures cannot be forged without knowing `BRIDGE_API_KEY`
 - **CallSid forgery:** Signature verification fails if CallSid is tampered with
 - **Parameter injection:** Custom parameters are cross-checked against URL parameters
 - **Signature burn DoS:** Claimed signatures that close before CallSid bind are restored to pending with preserved TTL
@@ -115,11 +115,11 @@ The `/media-stream` WebSocket endpoint uses **HMAC-SHA256 signature-based authen
 
 **Security properties:**
 - **Strong binding:** Signature is cryptographically bound to CallSid and timestamp
-- **Non-replayable:** Each call gets a unique signature; replays fail even within TTL
+- **Single-use per process:** Each call gets a unique signature; replays are rejected within the same process instance
 - **Time-limited:** Timestamps expire after `MEDIA_AUTH_WINDOW_MS`
 - **No bearer tokens:** Cannot be used without knowing the secret key
 
-**Note:** This HMAC-based approach provides production-grade security for hostile edge environments. The signature cannot be forged or reused, and leaked credentials only work for the specific CallSid + timestamp they were generated for, within the expiration window.
+**Note:** This HMAC-based approach provides cryptographic signature verification and time-limited, single-use tokens. Replay protection is process-local (in-memory state), so horizontal scaling requires sticky sessions. The signature cannot be forged without the secret key, and leaked credentials only work for the specific CallSid + timestamp they were generated for, within the expiration window.
 
 ### Session Lifecycle & Error Handling
 
@@ -155,7 +155,7 @@ The bridge accepts either header:
 - **Recording** is **opt-in only** (default off). Set `ENABLE_RECORDING=1` to enable dual-channel call recording.
 - **AI disclosure** is **on by default**. The agent is instructed to disclose it is AI at the start of calls. Set `SKIP_AI_DISCLOSURE=1` to disable (review legal requirements in your jurisdiction first).
 
-### Production deployment
+### Public deployment
 
 For public hosts, **always** use one of:
 1. Set `BRIDGE_API_KEY` to a strong secret
@@ -217,7 +217,7 @@ Optional softContinue true on POST /call enables post-playback soft-continue.
 ## Deployment requirements
 
 - **BRIDGE_API_KEY must be set**: Required for HMAC signing; calls fail without it
-- **Sticky/single-node required**: In-memory pending session state; load balancer must route all requests from same call to same server
+- **Sticky/single-node required**: In-memory pending session state means replay protection and session tracking are process-local; load balancers must route all requests from the same call to the same server instance
 - **HTTPS/WSS required**: Twilio Media Streams require secure WebSocket connections
 - **TWILIO_AUTH_TOKEN recommended**: Enables X-Twilio-Signature validation on `/twiml-connect` to prevent sessionId theft
 

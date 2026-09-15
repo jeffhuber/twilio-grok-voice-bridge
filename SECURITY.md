@@ -45,7 +45,7 @@ All control-plane routes (`/call`, `/steer`, `/hangup`, `/voice`, `/transcript`)
 - Body parsing runs before authentication middleware (Express architectural constraint)
 - All body-parser errors (malformed JSON, encoding errors, oversized payloads) are caught by custom error middleware
 - Returns safe JSON responses without exposing filesystem paths, stack traces, or HTML error pages
-- Production-safe Express configuration (`app.set('env', 'production')`) prevents default error page leakage
+- Hardened Express configuration (`app.set('env', 'production')`) prevents default error page leakage
 - `x-powered-by` header disabled to avoid version disclosure
 
 **Error responses:**
@@ -68,7 +68,7 @@ Sensitive environment variables should never be committed:
 - `XAI_API_KEY`
 - `BRIDGE_API_KEY`
 
-Use `.env` (gitignored) or secret management systems in production.
+Use `.env` (gitignored) or secret management systems for deployments.
 
 ## Spending and Rate Controls
 
@@ -76,12 +76,12 @@ Use `.env` (gitignored) or secret management systems in production.
 - This bridge does NOT implement rate limiting or spending caps for Twilio calls or xAI API usage
 - **Twilio:** Configure billing alerts and rate limits in the [Twilio Console](https://console.twilio.com) under Account → Usage → Alerts
 - **xAI:** Monitor API usage and set up alerts through your xAI dashboard or billing settings
-- For production deployments, consider adding:
+- For shared or public deployments, consider adding:
   - IP allowlists or VPN-only access to operator routes
   - Additional middleware for per-user or per-hour call limits
   - Budget alerting via cloud provider notifications (AWS Budget, GCP Billing Alerts, etc.)
 
-## Production Deployment Checklist
+## Deployment Checklist
 
 - [ ] Set `BRIDGE_API_KEY` to a strong random secret (required - server exits on startup without it)
 - [ ] Ensure `ALLOW_UNAUTHENTICATED_OPERATOR` is NOT set (fail-closed by default; only use `=1` for localhost demos)
