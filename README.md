@@ -181,6 +181,7 @@ For public hosts, **always** use one of:
 | SESSION_MAX_AGE_MS | Maximum session age before GC in milliseconds (default 7200000 = 2 hours) |
 | ENABLE_RECORDING | Set to `1` to enable dual-channel call recording (default off) |
 | SKIP_AI_DISCLOSURE | Set to `1` to disable AI disclosure (default: disclosure enabled; check legal requirements first) |
+| LOG_TRANSCRIPTS | Set to `1` to enable transcript logging in stdout (default off for privacy; destination phone numbers are masked regardless) |
 | CONTACT_FULL_NAME | Optional; restaurant-book style |
 | CONTACT_MOBILE | Optional callback number for restaurant-book |
 | BARGE_IN_CONFIRM_MS | Barge-in confirm window ms (default 280) |
@@ -209,6 +210,7 @@ Optional softContinue true on POST /call enables post-playback soft-continue.
 - **X-Twilio-Signature validation**: Set `TWILIO_AUTH_TOKEN` to enable signature validation on `/twiml-connect` (prevents sessionId theft).
 - **Recording is opt-in** via `ENABLE_RECORDING=1` (default off).
 - **AI disclosure is on by default**. Review legal requirements before setting `SKIP_AI_DISCLOSURE=1`.
+- **Privacy defaults (v1.4+):** Phone numbers are masked in logs (last 4 digits only), transcript logging is off by default (`LOG_TRANSCRIPTS=0`).
 - Keep Twilio tokens, xAI keys, BRIDGE_API_KEY, and real phone numbers out of git.
 - Twilio needs a public WSS URL for Media Streams.
 

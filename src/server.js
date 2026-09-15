@@ -24,6 +24,19 @@ const BRIDGE_API_KEY = process.env.BRIDGE_API_KEY;
 const ALLOW_UNAUTHENTICATED_OPERATOR = process.env.ALLOW_UNAUTHENTICATED_OPERATOR === '1';
 const ENABLE_RECORDING = process.env.ENABLE_RECORDING === '1';
 const SKIP_AI_DISCLOSURE = process.env.SKIP_AI_DISCLOSURE === '1';
+const LOG_TRANSCRIPTS = process.env.LOG_TRANSCRIPTS === '1';
+
+/**
+ * Mask phone number for safe logging (show last 4 digits only).
+ * Returns 'xxxx1234' for E.164 numbers, or original if too short.
+ */
+function maskPhoneNumber(phone) {
+  if (!phone) return '(null)';
+  const s = String(phone);
+  if (s.length <= 4) return s;
+  const last4 = s.slice(-4);
+  return 'x'.repeat(Math.min(s.length - 4, 8)) + last4;
+}
 
 /** Optional JSON map of alias → voice id, e.g. {"my-voice":"abc123","clone":"xyz"} */
 function loadVoiceAliases() {
@@ -610,12 +623,20 @@ function appendTranscript(session, role, text) {
     if (line.text.startsWith(prev.text) || prev.text.startsWith(line.text)) {
       prev.text = line.text.length >= prev.text.length ? line.text : prev.text;
       prev.ts = line.ts;
-      console.log(`[transcript] ${role}: ${prev.text.slice(0, 120)}`);
+      if (LOG_TRANSCRIPTS) {
+        console.log(`[transcript] ${role}: ${prev.text.slice(0, 120)}`);
+      } else {
+        console.log(`[transcript] ${role}: (redacted; set LOG_TRANSCRIPTS=1 to enable)`);
+      }
       return;
     }
   }
   session.transcript.push(line);
-  console.log(`[transcript] ${role}: ${line.text.slice(0, 120)}`);
+  if (LOG_TRANSCRIPTS) {
+    console.log(`[transcript] ${role}: ${line.text.slice(0, 120)}`);
+  } else {
+    console.log(`[transcript] ${role}: (redacted; set LOG_TRANSCRIPTS=1 to enable)`);
+  }
 }
 
 function detectHangupSignal(text) {
@@ -1452,7 +1473,7 @@ app.post('/call', requireBridgeAuth, async (req, res) => {
     sessionsByCallSid.set(callSid, session);
 
     const redactedTwimlUrl = `https://${PUBLIC_HOST}/twiml-connect?sessionId=${tempId.slice(0, 8)}...`;
-    console.log(`[call] placed sid=${callSid} to=${to} style=${resolvedStyle} twimlUrl=${redactedTwimlUrl}`);
+    console.log(`[call] placed sid=${callSid} to=${maskPhoneNumber(to)} style=${resolvedStyle} twimlUrl=${redactedTwimlUrl}`);
     res.json({
       ok: true,
       callSid: call.sid,
