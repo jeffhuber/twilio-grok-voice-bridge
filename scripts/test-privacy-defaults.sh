@@ -6,55 +6,26 @@ set -euo pipefail
 echo "=== Privacy defaults test ==="
 echo ""
 
-# Test 1: Phone number masking function
-echo "Test 1: Phone number masking"
-node -e "
-function maskPhoneNumber(phone) {
-  if (!phone) return '(null)';
-  const s = String(phone);
-  if (s.length <= 4) return s;
-  const last4 = s.slice(-4);
-  return 'x'.repeat(Math.min(s.length - 4, 8)) + last4;
-}
-
-const tests = [
-  { input: '+12025551234', expected: 'xxxxxxxx1234' },
-  { input: '5551234', expected: 'xxx1234' },
-  { input: '1234', expected: '1234' },
-  { input: '', expected: '(null)' },
-  { input: null, expected: '(null)' },
-  { input: '+441234567890', expected: 'xxxxxxxx7890' }
-];
-
-let passed = 0;
-let failed = 0;
-
-tests.forEach(({ input, expected }) => {
-  const result = maskPhoneNumber(input);
-  if (result === expected) {
-    console.log(\`  ✓ maskPhoneNumber(\${JSON.stringify(input)}) = \${result}\`);
-    passed++;
-  } else {
-    console.log(\`  ✗ maskPhoneNumber(\${JSON.stringify(input)}) = \${result} (expected \${expected})\`);
-    failed++;
-  }
-});
-
-console.log(\`\nPassed: \${passed}/\${tests.length}\`);
-process.exit(failed > 0 ? 1 : 0);
-"
-
-if [ $? -eq 0 ]; then
-  echo "✓ Phone masking tests passed"
-else
-  echo "✗ Phone masking tests failed"
+# Test 1: Phone number masking function (from actual server.js)
+echo "Test 1: Phone number masking (src/server.js)"
+node test/test-privacy-functions.js
+if [ $? -ne 0 ]; then
   exit 1
 fi
 
 echo ""
 
-# Test 2: LOG_TRANSCRIPTS default value in .env.example
-echo "Test 2: LOG_TRANSCRIPTS default (should be empty/unset)"
+# Test 2: Verify LOG_TRANSCRIPTS behavior (silence when off)
+echo "Test 2: LOG_TRANSCRIPTS behavior (must be silent when off)"
+node test/test-transcript-logging.js
+if [ $? -ne 0 ]; then
+  exit 1
+fi
+
+echo ""
+
+# Test 3: LOG_TRANSCRIPTS default value in .env.example
+echo "Test 3: LOG_TRANSCRIPTS default in .env.example (should be empty/unset)"
 LOG_TRANSCRIPTS_VALUE=$(grep "^LOG_TRANSCRIPTS=" .env.example | cut -d= -f2)
 
 if [ -z "$LOG_TRANSCRIPTS_VALUE" ]; then
@@ -66,8 +37,8 @@ fi
 
 echo ""
 
-# Test 3: Verify .env.example contains LOG_TRANSCRIPTS entry
-echo "Test 3: .env.example contains LOG_TRANSCRIPTS"
+# Test 4: Verify .env.example contains LOG_TRANSCRIPTS entry
+echo "Test 4: .env.example contains LOG_TRANSCRIPTS"
 if grep -q "^LOG_TRANSCRIPTS=" .env.example; then
   echo "  ✓ LOG_TRANSCRIPTS= found in .env.example"
 else
@@ -77,8 +48,8 @@ fi
 
 echo ""
 
-# Test 4: Verify SECURITY.md mentions phone masking
-echo "Test 4: Documentation mentions privacy defaults"
+# Test 5: Verify SECURITY.md mentions phone masking
+echo "Test 5: Documentation mentions privacy defaults"
 if grep -q "masked by default" SECURITY.md; then
   echo "  ✓ SECURITY.md mentions phone masking"
 else

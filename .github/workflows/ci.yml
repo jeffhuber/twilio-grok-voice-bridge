@@ -43,6 +43,11 @@ jobs:
           find scripts -name "*.sh" -type f -exec bash -n {} \;
           echo "✓ All shell scripts passed syntax check"
       
+      - name: Run privacy defaults test
+        run: |
+          echo "=== Running privacy defaults test ==="
+          bash scripts/test-privacy-defaults.sh
+      
       - name: Run body-parser safety test
         env:
           BRIDGE_API_KEY: ci-test-key-not-a-secret

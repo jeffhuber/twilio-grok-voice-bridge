@@ -139,9 +139,9 @@ Use `.env` (gitignored) or secret management systems in production.
   - Add additional controls: IP allowlists, Cloudflare Access, etc.
 
 **Operator/bridge logs contain call metadata (privacy defaults enabled):**
-- **Default privacy protections** (as of v1.4):
+- **Default privacy protections:**
   - Destination phone numbers are **masked by default** (last 4 digits shown: `xxxx1234`)
-  - Transcript content is **redacted by default** (shows `(redacted; set LOG_TRANSCRIPTS=1 to enable)`)
+  - Transcript content is **not logged by default** (set `LOG_TRANSCRIPTS=1` to enable)
   - Set `LOG_TRANSCRIPTS=1` to explicitly enable transcript logging for debugging
 - Bridge stdout logs include masked destination numbers and (when enabled) partial transcript content (~120 chars per log line) for operational visibility
 - **Risk:** Pasting bridge or Twilio operator logs into public channels (chat, gist, GitHub issues) may leak:
@@ -184,11 +184,11 @@ The HMAC-based authentication provides:
 
 ## Audit History
 
-| Date | Version | Changes |
-|------|---------|---------|
-| 2026-09-15 | v1.4 | Privacy defaults: phone number masking (last 4 only), transcript logging opt-in (LOG_TRANSCRIPTS=0 default) |
-| 2026-09-13 | v1.3 | Body-parser error handling hardening: prevent filesystem path leakage on malformed JSON |
-| 2026-09-12 | v1.2 | HMAC-SHA256 signature-based media stream auth with cryptographic CallSid binding |
-| 2026-09-11 | v1.1 | Crash containment, session GC, qs audit fix, duplicate stream prevention |
-| 2026-09-10 | v1.0 | Initial security hardening: CallSid bind, signature claim, BRIDGE_API_KEY auth |
-| 2026-09-09 | v0.1 | Proof-of-concept public release |
+| Date | Changes |
+|------|---------|
+| 2026-09-15 | Privacy defaults: phone number masking (last 4 only), transcript logging opt-in (LOG_TRANSCRIPTS=0 default) |
+| 2026-09-13 | Body-parser error handling hardening: prevent filesystem path leakage on malformed JSON |
+| 2026-09-12 | HMAC-SHA256 signature-based media stream auth with cryptographic CallSid binding |
+| 2026-09-11 | Crash containment, session GC, qs audit fix, duplicate stream prevention |
+| 2026-09-10 | Initial security hardening: CallSid bind, signature claim, BRIDGE_API_KEY auth |
+| 2026-09-09 | Proof-of-concept public release |

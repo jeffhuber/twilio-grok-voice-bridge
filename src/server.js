@@ -625,8 +625,6 @@ function appendTranscript(session, role, text) {
       prev.ts = line.ts;
       if (LOG_TRANSCRIPTS) {
         console.log(`[transcript] ${role}: ${prev.text.slice(0, 120)}`);
-      } else {
-        console.log(`[transcript] ${role}: (redacted; set LOG_TRANSCRIPTS=1 to enable)`);
       }
       return;
     }
@@ -634,8 +632,6 @@ function appendTranscript(session, role, text) {
   session.transcript.push(line);
   if (LOG_TRANSCRIPTS) {
     console.log(`[transcript] ${role}: ${line.text.slice(0, 120)}`);
-  } else {
-    console.log(`[transcript] ${role}: (redacted; set LOG_TRANSCRIPTS=1 to enable)`);
   }
 }
 
