@@ -82,6 +82,30 @@ for (const name of opsVars) {
 if (!readme.includes('ops/README.md')) fail('README does not link ops/README.md');
 else pass('ops script variables are listed');
 
+const mediaRows = readme.split('\n').filter((line) => line.includes('MEDIA_STREAM_SECRET') && line.includes('|'));
+if (mediaRows.length === 0) {
+  fail('README is missing a MEDIA_STREAM_SECRET table row');
+} else if (!mediaRows.some((line) => line.includes('non-empty') && line.includes('BRIDGE_API_KEY'))) {
+  fail('MEDIA_STREAM_SECRET row must say a non-empty dedicated secret wins, otherwise BRIDGE_API_KEY');
+} else {
+  pass('MEDIA_STREAM_SECRET row documents the fallback');
+}
+
+if (readme.includes('media-stream HMAC uses `BRIDGE_API_KEY`')) {
+  fail('README still says media-stream HMAC uses only BRIDGE_API_KEY');
+}
+if (!example.includes('MEDIA_STREAM_SECRET') || !example.includes('non-empty after trim')) {
+  fail('.env.example HMAC comment does not describe MEDIA_STREAM_SECRET');
+} else {
+  pass('.env.example documents the dedicated media HMAC key');
+}
+
+if (!readme.includes('The environment value is a string, so `"0"` is kept')) {
+  fail('README does not document that numeric env strings keep 0');
+} else {
+  pass('README documents Number(process.env.NAME || default) and string 0');
+}
+
 if (failed > 0) {
   console.error(`\n${failed} env doc check(s) failed`);
   process.exit(1);

@@ -84,7 +84,7 @@ The `/media-stream` WebSocket endpoint uses **HMAC-SHA256 signature-based authen
 
 **How it works:**
 1. When `/call` is invoked, Twilio fetches TwiML from the `/twiml-connect` endpoint
-2. The bridge generates HMAC-SHA256 signature: `HMAC(BRIDGE_API_KEY, callSid:timestamp)`
+2. The bridge generates an HMAC-SHA256 signature: `HMAC(media secret, callSid:timestamp)`. The media secret is `MEDIA_STREAM_SECRET` when that value is non-empty after trimming, otherwise `BRIDGE_API_KEY`
 3. The signature, CallSid, and timestamp are embedded in the Media Stream URL: `wss://HOST/media-stream?callSid=...&timestamp=...&signature=...`
 4. These parameters are also passed as TwiML custom parameters for defense-in-depth verification
 5. On WebSocket upgrade, the bridge:
@@ -101,13 +101,13 @@ The `/media-stream` WebSocket endpoint uses **HMAC-SHA256 signature-based authen
 **This mitigates:**
 - **Replay attacks:** Signatures are single-use within a process instance and time-limited (default 2 minutes)
 - **Token leakage:** Signatures are bound to a specific CallSid and timestamp
-- **Bearer token weakness:** HMAC signatures cannot be forged without knowing `BRIDGE_API_KEY`
+- **Bearer token weakness:** HMAC signatures cannot be forged without the media secret (`MEDIA_STREAM_SECRET` when non-empty after trim, otherwise `BRIDGE_API_KEY`)
 - **CallSid forgery:** Signature verification fails if CallSid is tampered with
 - **Parameter injection:** Custom parameters are cross-checked against URL parameters
 - **Signature burn DoS:** Claimed signatures that close before CallSid bind are restored to pending with preserved TTL
 
 **Signature verification:**
-- HMAC-SHA256 signature over `callSid:timestamp` using `BRIDGE_API_KEY` as secret
+- HMAC-SHA256 signature over `callSid:timestamp` using `MEDIA_STREAM_SECRET` when non-empty after trim, otherwise `BRIDGE_API_KEY`
 - Constant-time comparison prevents timing attacks
 - Timestamp must be within `MEDIA_AUTH_WINDOW_MS` (default 2 minutes)
 - Signatures are single-use (claimed atomically on upgrade)
@@ -168,11 +168,13 @@ For public hosts, **always** use one of:
 
 Values are read from the process environment (dotenv with `override: true`). `ALLOW_UNAUTHENTICATED_OPERATOR`, `ENABLE_RECORDING`, `SKIP_AI_DISCLOSURE`, and `LOG_TRANSCRIPTS` are on only when the value is exactly `1`. `true`, `yes`, and `0` do not turn them on.
 
+Numeric settings use `Number(process.env.NAME || default)`. The environment value is a string, so `"0"` is kept and becomes numeric 0; it is not replaced by the default. An empty or unset value uses the default. `Number(value) || default` would drop numeric 0; these settings do not use that form.
+
 The process calls `process.exit(1)` at startup when `BRIDGE_API_KEY` is unset or empty and `ALLOW_UNAUTHENTICATED_OPERATOR` is not exactly `1`.
 
 `TWILIO_AUTH_TOKEN` enables `X-Twilio-Signature` checks on `/twiml-connect` only when it is non-empty. The signed URL is `https://${PUBLIC_HOST}` plus the request path and query. If `PUBLIC_HOST` is not the host Twilio used, validation fails with **403**. An empty `PUBLIC_HOST` makes `POST /call` return 500 and makes `/twiml-connect` return 500 when it builds TwiML.
 
-On this branch, media-stream HMAC uses `BRIDGE_API_KEY`. If that key is empty, signature minting throws and `/twiml-connect` returns 500.
+Media-stream HMAC uses `MEDIA_STREAM_SECRET` when that value is non-empty after trim, otherwise `BRIDGE_API_KEY`. If both are empty, signature minting throws and `/twiml-connect` returns 500. `ALLOW_UNAUTHENTICATED_OPERATOR=1` leaves operator routes open and still allows calls to complete when `MEDIA_STREAM_SECRET` is set.
 
 | Variable | Purpose | Default |
 |----------|---------|---------|
@@ -186,7 +188,8 @@ On this branch, media-stream HMAC uses `BRIDGE_API_KEY`. If that key is empty, s
 | `VOICE_ALIASES` | JSON object merged over built-in aliases (`ara`, `eve`, `rex`, `sal`) | unset |
 | `PORT` | HTTP listen port | `3000` |
 | `PUBLIC_HOST` | Public hostname only (no scheme). Wrong value causes 403s when a Twilio token is set | unset |
-| `BRIDGE_API_KEY` | Operator secret (Bearer or `X-Bridge-Key`) and media HMAC key | unset; process exits unless the override below is exactly `1` |
+| `BRIDGE_API_KEY` | Operator secret (Bearer or `X-Bridge-Key`). Also the media HMAC key when `MEDIA_STREAM_SECRET` is empty | unset; process exits unless the override below is exactly `1` |
+| `MEDIA_STREAM_SECRET` | Media HMAC key when non-empty after trim. When empty, HMAC uses `BRIDGE_API_KEY` | unset |
 | `ALLOW_UNAUTHENTICATED_OPERATOR` | Exactly `1` starts without `BRIDGE_API_KEY` and leaves operator routes open | off |
 | `MEDIA_AUTH_WINDOW_MS` | HMAC timestamp window in milliseconds | `120000` |
 | `SESSION_MAX_AGE_MS` | Maximum session age before cleanup, milliseconds | `7200000` |
@@ -210,7 +213,7 @@ On this branch, media-stream HMAC uses `BRIDGE_API_KEY`. If that key is empty, s
 
 ### Ops script variables
 
-These are not read by `src/server.js`. They are read by `ops/*.sh` (see `ops/README.md` when that directory is present): `BRIDGE_HOME`, `TWILIO_BRIDGE_RUN_DIR`, `TWILIO_BRIDGE_LOG_DIR`, `TWILIO_BRIDGE_LOG_MAX_BYTES`, `CLOUDFLARED_BIN`, `CLOUDFLARED_CONFIG`, `TUNNEL_NAME`, `NODE_BIN`, `BRIDGE_ENTRY`, `SKIP_TUNNEL`, `BRIDGE_ENV_FILE`, `PROC_ROOT`, and `XDG_RUNTIME_DIR` (default parent of the pid directory).
+These are not read by `src/server.js`. They are read by `ops/*.sh` (see `ops/README.md` when that directory is present): `BRIDGE_HOME`, `TWILIO_BRIDGE_RUN_DIR`, `TWILIO_BRIDGE_LOG_DIR`, `TWILIO_BRIDGE_LOG_MAX_BYTES`, `CLOUDFLARED_BIN`, `CLOUDFLARED_CONFIG`, `TUNNEL_NAME`, `NODE_BIN`, `BRIDGE_ENTRY`, `SKIP_TUNNEL`, `BRIDGE_ENV_FILE`, `PROC_ROOT`, and `XDG_RUNTIME_DIR` (not used for pid files; the default run directory is `/tmp/twilio-bridge-<uid>` unless `TWILIO_BRIDGE_RUN_DIR` is set).
 
 Do not commit a real dotenv file. Use `.env.example` as the template only.
 
@@ -229,8 +232,8 @@ Optional softContinue true on POST /call enables post-playback soft-continue.
 
 ## Security notes
 
-- **BRIDGE_API_KEY**: The process exits unless this is set or `ALLOW_UNAUTHENTICATED_OPERATOR` is exactly `1`. It is the operator secret and the media HMAC key. With no key, `/twiml-connect` returns 500 because signature minting throws.
-- **Media Stream WebSocket** uses HMAC-SHA256 signature authentication (not bearer tokens) for strong security. Signatures are cryptographically bound to CallSid + timestamp.
+- **BRIDGE_API_KEY**: The process exits unless this is set or `ALLOW_UNAUTHENTICATED_OPERATOR` is exactly `1`. It is the operator secret, and it is the media HMAC key only when `MEDIA_STREAM_SECRET` is empty. With neither secret, `/twiml-connect` returns 500 because signature minting throws.
+- **Media Stream WebSocket** uses HMAC-SHA256 signature authentication (not bearer tokens). A signature covers a CallSid and timestamp, is single-use in this process, and expires after `MEDIA_AUTH_WINDOW_MS`.
 - **X-Twilio-Signature validation**: Runs on `/twiml-connect` only when `TWILIO_AUTH_TOKEN` is non-empty. The checked URL uses `PUBLIC_HOST`; a different host than the one Twilio signed returns 403.
 - **Recording** is on only when `ENABLE_RECORDING` is exactly `1`.
 - **AI disclosure** stays on unless `SKIP_AI_DISCLOSURE` is exactly `1`.
@@ -240,7 +243,7 @@ Optional softContinue true on POST /call enables post-playback soft-continue.
 
 ## Deployment requirements
 
-- **BRIDGE_API_KEY must be set** for HMAC signing unless you accept the unauthenticated-operator override (exactly `1`), which still cannot mint signatures without a key
+- **An HMAC secret must be available**: `MEDIA_STREAM_SECRET` when non-empty after trim, otherwise `BRIDGE_API_KEY`. `ALLOW_UNAUTHENTICATED_OPERATOR=1` opens operator routes and still mints signatures when `MEDIA_STREAM_SECRET` is set
 - **Sticky/single-node required**: In-memory pending session state means replay protection and session tracking are process-local; load balancers must route all requests from the same call to the same server instance
 - **HTTPS/WSS required**: Twilio Media Streams require secure WebSocket connections
 - **TWILIO_AUTH_TOKEN recommended**: Enables X-Twilio-Signature validation on `/twiml-connect` to prevent sessionId theft
