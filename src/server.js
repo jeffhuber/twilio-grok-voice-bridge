@@ -38,6 +38,19 @@ function maskPhoneNumber(phone) {
   return 'x'.repeat(Math.min(s.length - 4, 8)) + last4;
 }
 
+// Twilio error text can include the destination. Mask E.164 numbers before logging.
+function maskPhoneNumbersInText(text) {
+  return String(text == null ? '' : text).replace(/\+\d{8,15}/g, (match) => maskPhoneNumber(match));
+}
+
+function logCallError(err) {
+  console.error('[call] error:', maskPhoneNumbersInText(err && err.message));
+}
+
+function logHangupError(err) {
+  console.error('[hangup] Twilio update failed:', maskPhoneNumbersInText(err && err.message));
+}
+
 /** Optional JSON map of alias → voice id, e.g. {"my-voice":"abc123","clone":"xyz"} */
 function loadVoiceAliases() {
   const builtIn = {
@@ -1172,7 +1185,7 @@ async function hangupTwilioCall(callSid) {
     await twilioClient.calls(callSid).update({ status: 'completed' });
     console.log(`[hangup] Twilio call completed callSid=${callSid}`);
   } catch (err) {
-    console.error(`[hangup] Twilio update failed:`, err.message);
+    logHangupError(err);
   }
 }
 
@@ -1483,7 +1496,7 @@ app.post('/call', requireBridgeAuth, async (req, res) => {
       hangupRequested: false,
     });
   } catch (err) {
-    console.error('[call] error:', err.message);
+    logCallError(err);
     // Clean up tempId from maps to avoid leak until GC
     if (tempId) {
       pendingByCallSid.delete(tempId);
@@ -1815,9 +1828,18 @@ wss.on('connection', (ws, req) => {
   });
 });
 
-server.listen(PORT, () => {
-  console.log(`[server] listening on :${PORT}`);
-  console.log(`[server] PUBLIC_HOST=${PUBLIC_HOST || '(not set)'}`);
-  console.log(`[server] media stream wss://${PUBLIC_HOST || 'PUBLIC_HOST'}/media-stream`);
-  console.log(`[server] voice=${XAI_VOICE} model=${XAI_MODEL}`);
-});
+if (require.main === module) {
+  server.listen(PORT, () => {
+    console.log(`[server] listening on :${PORT}`);
+    console.log(`[server] PUBLIC_HOST=${PUBLIC_HOST || '(not set)'}`);
+    console.log(`[server] media stream wss://${PUBLIC_HOST || 'PUBLIC_HOST'}/media-stream`);
+    console.log(`[server] voice=${XAI_VOICE} model=${XAI_MODEL}`);
+  });
+}
+
+module.exports = {
+  maskPhoneNumber,
+  maskPhoneNumbersInText,
+  logCallError,
+  logHangupError,
+};

@@ -210,7 +210,7 @@ Optional softContinue true on POST /call enables post-playback soft-continue.
 - **X-Twilio-Signature validation**: Set `TWILIO_AUTH_TOKEN` to enable signature validation on `/twiml-connect` (prevents sessionId theft).
 - **Recording is opt-in** via `ENABLE_RECORDING=1` (default off).
 - **AI disclosure is on by default**. Review legal requirements before setting `SKIP_AI_DISCLOSURE=1`.
-- **Privacy defaults:** Phone numbers are masked in logs (last 4 digits only), transcript logging is off by default (`LOG_TRANSCRIPTS=0`).
+- **Privacy defaults:** Phone numbers are masked in logs (last 4 digits only), including E.164 numbers inside `[call] error:` and `[hangup] Twilio update failed:` text. Transcript logging is off by default (`LOG_TRANSCRIPTS=0`). The HTTP error body from `POST /call` is the Twilio message for the operator who placed the call.
 - Keep Twilio tokens, xAI keys, BRIDGE_API_KEY, and real phone numbers out of git.
 - Twilio needs a public WSS URL for Media Streams.
 
