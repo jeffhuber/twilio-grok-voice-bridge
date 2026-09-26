@@ -45,7 +45,7 @@ Request bodies: docs/http-examples.md. Agent wiring: SKILL.md.
 
 Body JSON:
 
-- `to` (required) — destination E.164
+- `to` (required) — destination E.164 (`+` then 2 to 15 digits). Any other value is 400 `to must be an E.164 number` and the response does not include the value.
 - `goal` (required) — what the voice agent should accomplish
 - `context` (optional)
 - `style` (optional) — `support` | `restaurant-book` | `custom`
@@ -219,7 +219,7 @@ Optional softContinue true on POST /call enables post-playback soft-continue.
 - **X-Twilio-Signature validation**: Set `TWILIO_AUTH_TOKEN` to enable signature validation on `/twiml-connect` (prevents sessionId theft).
 - **Recording is opt-in** via `ENABLE_RECORDING=1` (default off).
 - **AI disclosure is on by default**. Review legal requirements before setting `SKIP_AI_DISCLOSURE=1`.
-- **Privacy defaults:** Phone numbers are masked in logs (last 4 digits only), transcript logging is off by default (`LOG_TRANSCRIPTS=0`).
+- **Privacy defaults:** Phone numbers are masked in logs (last 4 digits only). A run of 7 or more digits is masked, including spaces, hyphens, parentheses, and periods inside the run. A letter or digit on either side leaves the text alone, so Call SIDs and short error codes stay intact. A whole IPv4 address and a whole calendar date are left alone. There is no epoch-millisecond exemption, so a 13-digit run is masked, including a run that starts with + and the country code. That covers `[call] error:`, `[hangup] Twilio update failed:`, `[twiml-connect] Error:`, `[http] unexpected error:`, `[http] 400 body parse error:`, `[grok] error`, `[grok] server error`, `[grok] JSON parse error`, and `[twilio] JSON parse error` on a bound session. The media-stream connection's pre-bind JSON parse log and socket error listener stay as they are on main. Transcript logging is off by default (`LOG_TRANSCRIPTS=0`). The HTTP 500 body from `POST /call` is that same masked text.
 - Keep Twilio tokens, xAI keys, BRIDGE_API_KEY, and real phone numbers out of git.
 - Twilio needs a public WSS URL for Media Streams.
 

@@ -128,11 +128,16 @@ jobs:
           
           # Exit with test result
           exit $TEST_EXIT
-      
+
       - name: Run ringing-session GC test
         env:
           BRIDGE_API_KEY: ci-test-key-not-a-secret
         run: node test/test-ringing-session-gc.js
+
+      - name: Run call-error mask test
+        env:
+          BRIDGE_API_KEY: ci-test-key-not-a-secret
+        run: node test/test-mask-call-errors.js
 
       - name: Security audit (advisory only)
         run: |

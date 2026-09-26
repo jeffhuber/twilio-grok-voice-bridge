@@ -170,6 +170,51 @@ function maskPhoneNumbersInText(text) {
   return out;
 }
 
+function isE164(value) {
+  return typeof value === 'string' && /^\+[1-9]\d{1,14}$/.test(value);
+}
+
+function logCallError(err) {
+  console.error('[call] error:', maskPhoneNumbersInText(err && err.message));
+}
+
+function logHangupError(err) {
+  console.error('[hangup] Twilio update failed:', maskPhoneNumbersInText(err && err.message));
+}
+
+function logTwimlConnectError(err) {
+  console.error('[twiml-connect] Error:', maskPhoneNumbersInText(err && err.message));
+}
+
+function logHttpUnexpectedError(err) {
+  console.error('[http] unexpected error:', maskPhoneNumbersInText(err && err.message));
+}
+
+function logBodyParseError(err) {
+  console.log(`[http] 400 body parse error: ${maskPhoneNumbersInText(err && err.message)}`);
+}
+
+function logGrokSocketError(session, err) {
+  console.error(
+    `[grok] error callSid=${session && session.callSid}:`,
+    maskPhoneNumbersInText(err && err.message)
+  );
+}
+
+function logGrokJsonParseError(session, err) {
+  console.error(
+    `[grok] JSON parse error callSid=${session && session.callSid}:`,
+    maskPhoneNumbersInText(err && err.message)
+  );
+}
+
+function logTwilioJsonParseError(session, err) {
+  console.error(
+    `[twilio] JSON parse error callSid=${session && session.callSid}:`,
+    maskPhoneNumbersInText(err && err.message)
+  );
+}
+
 /** Optional JSON map of alias → voice id, e.g. {"my-voice":"abc123","clone":"xyz"} */
 function loadVoiceAliases() {
   const builtIn = {
@@ -186,7 +231,10 @@ function loadVoiceAliases() {
       return { ...builtIn, ...parsed };
     }
   } catch (err) {
-    console.warn('[warn] VOICE_ALIASES is not valid JSON — ignoring:', err.message);
+    console.warn(
+      '[warn] VOICE_ALIASES is not valid JSON — ignoring:',
+      maskPhoneNumbersInText(err && err.message)
+    );
   }
   return builtIn;
 }
@@ -283,6 +331,11 @@ function switchSessionVoice(session, requested, { announce = true, reason = 'api
 const XAI_VOICE = resolveVoiceId(process.env.XAI_VOICE || process.env.GROK_VOICE || 'ara');
 const XAI_MODEL = process.env.XAI_VOICE_MODEL || 'grok-voice-latest';
 const XAI_REALTIME_URL = `wss://api.x.ai/v1/realtime?model=${encodeURIComponent(XAI_MODEL)}`;
+let grokRealtimeUrlOverride = '';
+
+function setGrokRealtimeUrlForTests(url) {
+  grokRealtimeUrlOverride = url ? String(url) : '';
+}
 
 // Hold-music / IVR hardening: higher VAD threshold + longer silence
 const VAD_THRESHOLD = Number(process.env.VAD_THRESHOLD || 0.7);
@@ -462,10 +515,14 @@ if (!BRIDGE_API_KEY && ALLOW_UNAUTHENTICATED_OPERATOR) {
   console.warn('');
 }
 
-const twilioClient =
+let twilioClient =
   TWILIO_ACCOUNT_SID && TWILIO_AUTH_TOKEN
     ? twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
     : null;
+
+function setTwilioClientForTests(client) {
+  twilioClient = client;
+}
 
 /** @type {Map<string, CallSession>} callSid -> session */
 const sessionsByCallSid = new Map();
@@ -532,7 +589,10 @@ function verifyMediaAuthSignature(callSid, timestamp, signature) {
     
     return { valid: true };
   } catch (err) {
-    return { valid: false, error: `signature verification failed: ${err.message}` };
+    return {
+      valid: false,
+      error: `signature verification failed: ${maskPhoneNumbersInText(err && err.message)}`,
+    };
   }
 }
 
@@ -1147,7 +1207,7 @@ function openGrokSession(session) {
   }
 
   console.log(`[grok] connecting model=${XAI_MODEL} voice=${session.voice}`);
-  const grokWs = new WebSocket(XAI_REALTIME_URL, {
+  const grokWs = new WebSocket(grokRealtimeUrlOverride || XAI_REALTIME_URL, {
     headers: { Authorization: `Bearer ${XAI_API_KEY}` },
   });
   session.grokWs = grokWs;
@@ -1175,7 +1235,7 @@ function openGrokSession(session) {
       }
       event = JSON.parse(text);
     } catch (err) {
-      console.error(`[grok] JSON parse error callSid=${session.callSid}:`, err.message);
+      logGrokJsonParseError(session, err);
       return;
     }
     if (!event || typeof event !== 'object') {
@@ -1186,7 +1246,7 @@ function openGrokSession(session) {
   });
 
   grokWs.on('error', (err) => {
-    console.error(`[grok] error callSid=${session.callSid}:`, err.message);
+    logGrokSocketError(session, err);
   });
 
   grokWs.on('close', (code, reason) => {
@@ -1361,7 +1421,7 @@ function handleTwilioMessage(session, raw) {
     }
     msg = JSON.parse(text);
   } catch (err) {
-    console.error(`[twilio] JSON parse error callSid=${session.callSid}:`, err.message);
+    logTwilioJsonParseError(session, err);
     return;
   }
   if (!msg || typeof msg !== 'object') {
@@ -1448,7 +1508,7 @@ async function hangupTwilioCall(callSid) {
     await twilioClient.calls(callSid).update({ status: 'completed' });
     console.log(`[hangup] Twilio call completed callSid=${callSid}`);
   } catch (err) {
-    console.error(`[hangup] Twilio update failed:`, err.message);
+    logHangupError(err);
   }
 }
 
@@ -1617,14 +1677,14 @@ app.use((err, req, res, next) => {
     err.statusCode === 400 ||
     (err instanceof SyntaxError && 'body' in err)
   ) {
-    console.log(`[http] 400 body parse error: ${err.message}`);
+    logBodyParseError(err);
     return res.status(400).json({ error: 'invalid request body' });
   }
 
   // Catch any other middleware errors and return safe generic response
   // Never expose stack traces, require.main paths, or filesystem details
   if (err) {
-    console.error('[http] unexpected error:', err.message);
+    logHttpUnexpectedError(err);
     return res.status(500).json({ error: 'internal server error' });
   }
 
@@ -1762,7 +1822,7 @@ app.all('/twiml-connect', (req, res) => {
     console.log(`[twiml-connect] Generated TwiML callSid=${callSid} ts=${timestamp} method=${req.method}`);
     res.type('text/xml').send(twiml);
   } catch (err) {
-    console.error('[twiml-connect] Error:', err.message);
+    logTwimlConnectError(err);
     res.status(500).type('text/xml').send('<Response><Hangup/></Response>');
   }
 });
@@ -1776,6 +1836,9 @@ app.post('/call', requireBridgeAuth, async (req, res) => {
     }
     if (openerOnConnect !== undefined && typeof openerOnConnect !== 'boolean') {
       return res.status(400).json({ error: 'openerOnConnect must be a boolean when provided' });
+    }
+    if (!isE164(to)) {
+      return res.status(400).json({ error: 'to must be an E.164 number' });
     }
     if (!twilioClient) {
       return res.status(500).json({ error: 'Twilio client not configured' });
@@ -1843,13 +1906,13 @@ app.post('/call', requireBridgeAuth, async (req, res) => {
       hangupRequested: false,
     });
   } catch (err) {
-    console.error('[call] error:', err.message);
+    logCallError(err);
     // Clean up tempId from maps to avoid leak until GC
     if (tempId) {
       pendingByCallSid.delete(tempId);
       sessionsByCallSid.delete(tempId);
     }
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: maskPhoneNumbersInText(err && err.message) });
   }
 });
 
@@ -2428,9 +2491,23 @@ module.exports = {
   MEDIA_PREBIND_TERMINATE_MS,
   mediaClientKey,
   noteUnauthMediaClose,
+  maskPhoneNumber,
   maskPhoneNumbersInText,
+  isE164,
+  logCallError,
+  logHangupError,
+  logTwimlConnectError,
+  logHttpUnexpectedError,
+  logBodyParseError,
+  logGrokSocketError,
+  logGrokJsonParseError,
+  logTwilioJsonParseError,
+  setTwilioClientForTests,
+  setGrokRealtimeUrlForTests,
+  handleTwilioMessage,
   handleGrokEvent,
   onGrokSocketOpen,
   connectOpenerEnabled,
+  wss,
   stripDeliveryTags,
 };
