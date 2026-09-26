@@ -47,6 +47,11 @@ jobs:
         run: |
           echo "=== Running privacy defaults test ==="
           bash scripts/test-privacy-defaults.sh
+
+      - name: Run env documentation test
+        run: |
+          echo "=== Running env documentation test ==="
+          node test/test-env-docs.js
       
       - name: Run body-parser safety test
         env:

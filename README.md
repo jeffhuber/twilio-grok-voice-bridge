@@ -152,8 +152,8 @@ The bridge accepts either header:
 
 ### Recording and Disclosure
 
-- **Recording** is **opt-in only** (default off). Set `ENABLE_RECORDING=1` to enable dual-channel call recording.
-- **AI disclosure** is **on by default**. The agent is instructed to disclose it is AI at the start of calls. Set `SKIP_AI_DISCLOSURE=1` to disable (review legal requirements in your jurisdiction first).
+- **Recording** is off unless `ENABLE_RECORDING` is exactly `1`. Other values, including `true`, do not enable it.
+- **AI disclosure** is on unless `SKIP_AI_DISCLOSURE` is exactly `1`. Review legal requirements before turning it off.
 
 ### Public deployment
 
@@ -166,29 +166,53 @@ For public hosts, **always** use one of:
 
 ## Environment table
 
-| Variable | Purpose |
-|----------|---------|
-| TWILIO_ACCOUNT_SID | Twilio account SID |
-| TWILIO_AUTH_TOKEN | Twilio auth token |
-| TWILIO_FROM_NUMBER | E.164 Twilio voice number |
-| XAI_API_KEY | xAI API key |
-| XAI_VOICE | Default TTS voice id (example: ara) |
-| PORT | HTTP listen port (default 3000) |
-| PUBLIC_HOST | Public hostname for media-stream WSS (no scheme) |
-| BRIDGE_API_KEY | **REQUIRED:** Shared secret for operator routes (Bearer or X-Bridge-Key) AND HMAC signing key for media stream auth. Without it, `/twiml-connect` returns 500 and calls fail. |
-| ALLOW_UNAUTHENTICATED_OPERATOR | Set to `1` to bypass auth when BRIDGE_API_KEY is unset (localhost demos only — never use for shared/public deployments). Server exits on startup if BRIDGE_API_KEY is missing and this is not set. |
-| MEDIA_AUTH_WINDOW_MS | HMAC signature validity window in milliseconds (default 120000 = 2 minutes) |
-| SESSION_MAX_AGE_MS | Maximum session age before GC in milliseconds (default 7200000 = 2 hours) |
-| ENABLE_RECORDING | Set to `1` to enable dual-channel call recording (default off) |
-| SKIP_AI_DISCLOSURE | Set to `1` to disable AI disclosure (default: disclosure enabled; check legal requirements first) |
-| LOG_TRANSCRIPTS | Set to `1` to enable transcript logging in stdout (default off for privacy; destination phone numbers are masked regardless) |
-| CONTACT_FULL_NAME | Optional; restaurant-book style |
-| CONTACT_MOBILE | Optional callback number for restaurant-book |
-| BARGE_IN_CONFIRM_MS | Barge-in confirm window ms (default 280) |
-| SOFT_CONTINUE_MS | Soft-continue delay ms (default 400) |
-| VOICE_ALIASES | Optional JSON alias map |
+Values are read from the process environment (dotenv with `override: true`). `ALLOW_UNAUTHENTICATED_OPERATOR`, `ENABLE_RECORDING`, `SKIP_AI_DISCLOSURE`, and `LOG_TRANSCRIPTS` are on only when the value is exactly `1`. `true`, `yes`, and `0` do not turn them on.
 
-Do not commit a real dotenv file. Use .env.example as the template only.
+The process calls `process.exit(1)` at startup when `BRIDGE_API_KEY` is unset or empty and `ALLOW_UNAUTHENTICATED_OPERATOR` is not exactly `1`.
+
+`TWILIO_AUTH_TOKEN` enables `X-Twilio-Signature` checks on `/twiml-connect` only when it is non-empty. The signed URL is `https://${PUBLIC_HOST}` plus the request path and query. If `PUBLIC_HOST` is not the host Twilio used, validation fails with **403**. An empty `PUBLIC_HOST` makes `POST /call` return 500 and makes `/twiml-connect` return 500 when it builds TwiML.
+
+On this branch, media-stream HMAC uses `BRIDGE_API_KEY`. If that key is empty, signature minting throws and `/twiml-connect` returns 500.
+
+| Variable | Purpose | Default |
+|----------|---------|---------|
+| `TWILIO_ACCOUNT_SID` | Twilio account SID | unset |
+| `TWILIO_AUTH_TOKEN` | Twilio auth token. Non-empty enables `/twiml-connect` signature checks | unset |
+| `TWILIO_FROM_NUMBER` | E.164 Twilio voice number | unset |
+| `XAI_API_KEY` | xAI API key | unset |
+| `XAI_VOICE` | Default TTS voice id or alias | `ara` |
+| `GROK_VOICE` | Fallback when `XAI_VOICE` is unset | unset |
+| `XAI_VOICE_MODEL` | Realtime model query parameter | `grok-voice-latest` |
+| `VOICE_ALIASES` | JSON object merged over built-in aliases (`ara`, `eve`, `rex`, `sal`) | unset |
+| `PORT` | HTTP listen port | `3000` |
+| `PUBLIC_HOST` | Public hostname only (no scheme). Wrong value causes 403s when a Twilio token is set | unset |
+| `BRIDGE_API_KEY` | Operator secret (Bearer or `X-Bridge-Key`) and media HMAC key | unset; process exits unless the override below is exactly `1` |
+| `ALLOW_UNAUTHENTICATED_OPERATOR` | Exactly `1` starts without `BRIDGE_API_KEY` and leaves operator routes open | off |
+| `MEDIA_AUTH_WINDOW_MS` | HMAC timestamp window in milliseconds | `120000` |
+| `SESSION_MAX_AGE_MS` | Maximum session age before cleanup, milliseconds | `7200000` |
+| `ENABLE_RECORDING` | Exactly `1` passes `record: true` and dual-channel recording to Twilio | off |
+| `SKIP_AI_DISCLOSURE` | Exactly `1` omits the AI disclosure block from instructions | off (disclosure on) |
+| `LOG_TRANSCRIPTS` | Exactly `1` writes transcript lines to stdout. Destination numbers in the call log are masked either way | off |
+| `CONTACT_FULL_NAME` | Optional name for restaurant-book instructions | unset |
+| `CONTACT_MOBILE` | Optional callback number for restaurant-book instructions | unset |
+| `VAD_THRESHOLD` | Server VAD threshold | `0.7` |
+| `VAD_SILENCE_MS` | Server VAD silence duration | `800` |
+| `VAD_PREFIX_MS` | Server VAD prefix padding | `300` |
+| `VAD_SOFT_THRESHOLD` | VAD threshold when soft-continue is on | `0.72` |
+| `VAD_SOFT_SILENCE_MS` | VAD silence when soft-continue is on | `350` |
+| `BARGE_IN_CONFIRM_MS` | How long user speech must last before barge-in | `280` |
+| `BARGE_IN_COOLDOWN_MS` | Minimum gap between barge-ins | `450` |
+| `BARGE_IN_MIN_AGENT_MS` | Ignore barge-in during the start of an agent utterance | `300` |
+| `SOFT_CONTINUE_MS` | Delay after playback before a soft-continue nudge | `400` |
+| `SOFT_CONTINUE_MAX` | Cap on soft-continue nudges per call | `8` |
+| `HOLD_GRACE_MS` | No hold heuristics until this many milliseconds after start | `8000` |
+| `HOLD_FRAMES` | Consecutive hold-like frames required to enter hold mode | `120` |
+
+### Ops script variables
+
+These are not read by `src/server.js`. They are read by `ops/*.sh` (see `ops/README.md` when that directory is present): `BRIDGE_HOME`, `TWILIO_BRIDGE_RUN_DIR`, `TWILIO_BRIDGE_LOG_DIR`, `TWILIO_BRIDGE_LOG_MAX_BYTES`, `CLOUDFLARED_BIN`, `CLOUDFLARED_CONFIG`, `TUNNEL_NAME`, `NODE_BIN`, `BRIDGE_ENTRY`, `SKIP_TUNNEL`, `BRIDGE_ENV_FILE`, `PROC_ROOT`, and `XDG_RUNTIME_DIR` (default parent of the pid directory).
+
+Do not commit a real dotenv file. Use `.env.example` as the template only.
 
 ## Styles
 
@@ -205,18 +229,18 @@ Optional softContinue true on POST /call enables post-playback soft-continue.
 
 ## Security notes
 
-- **BRIDGE_API_KEY is REQUIRED**: Without it, `/twiml-connect` returns 500 and calls fail. This key serves dual purposes: HTTP auth and HMAC signing.
+- **BRIDGE_API_KEY**: The process exits unless this is set or `ALLOW_UNAUTHENTICATED_OPERATOR` is exactly `1`. It is the operator secret and the media HMAC key. With no key, `/twiml-connect` returns 500 because signature minting throws.
 - **Media Stream WebSocket** uses HMAC-SHA256 signature authentication (not bearer tokens) for strong security. Signatures are cryptographically bound to CallSid + timestamp.
-- **X-Twilio-Signature validation**: Set `TWILIO_AUTH_TOKEN` to enable signature validation on `/twiml-connect` (prevents sessionId theft).
-- **Recording is opt-in** via `ENABLE_RECORDING=1` (default off).
-- **AI disclosure is on by default**. Review legal requirements before setting `SKIP_AI_DISCLOSURE=1`.
-- **Privacy defaults:** Phone numbers are masked in logs (last 4 digits only), transcript logging is off by default (`LOG_TRANSCRIPTS=0`).
+- **X-Twilio-Signature validation**: Runs on `/twiml-connect` only when `TWILIO_AUTH_TOKEN` is non-empty. The checked URL uses `PUBLIC_HOST`; a different host than the one Twilio signed returns 403.
+- **Recording** is on only when `ENABLE_RECORDING` is exactly `1`.
+- **AI disclosure** stays on unless `SKIP_AI_DISCLOSURE` is exactly `1`.
+- **Privacy defaults:** Destination numbers in the call log are masked. Transcript lines are written to stdout only when `LOG_TRANSCRIPTS` is exactly `1`.
 - Keep Twilio tokens, xAI keys, BRIDGE_API_KEY, and real phone numbers out of git.
 - Twilio needs a public WSS URL for Media Streams.
 
 ## Deployment requirements
 
-- **BRIDGE_API_KEY must be set**: Required for HMAC signing; calls fail without it
+- **BRIDGE_API_KEY must be set** for HMAC signing unless you accept the unauthenticated-operator override (exactly `1`), which still cannot mint signatures without a key
 - **Sticky/single-node required**: In-memory pending session state means replay protection and session tracking are process-local; load balancers must route all requests from the same call to the same server instance
 - **HTTPS/WSS required**: Twilio Media Streams require secure WebSocket connections
 - **TWILIO_AUTH_TOKEN recommended**: Enables X-Twilio-Signature validation on `/twiml-connect` to prevent sessionId theft
