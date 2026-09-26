@@ -647,6 +647,23 @@ function stripHangupToken(text) {
     .trim();
 }
 
+/**
+ * Strip delivery tags (e.g. [pause], [breath], [sigh]) from transcript.
+ * Grok generates audio directly; these tags are removed from the transcript display only.
+ * Returns { text: cleanedText, count: numberRemoved }
+ */
+function stripDeliveryTags(text) {
+  const input = String(text || '');
+  let count = 0;
+  const cleaned = input.replace(/\[(?:pause|breath|sigh|laugh|chuckle|hmm|uh|um|er|ah)\]/gi, (match) => {
+    count++;
+    return '';
+  });
+  // Collapse multiple spaces and trim
+  const normalized = cleaned.replace(/\s{2,}/g, ' ').trim();
+  return { text: normalized, count };
+}
+
 /** Heuristic: μ-law silence / low-energy loops look like hold music or IVR beds */
 function analyzeMulawEnergy(b64) {
   try {
@@ -990,7 +1007,12 @@ function handleGrokEvent(session, event) {
 
     case 'response.output_audio_transcript.done':
     case 'response.audio_transcript.done': {
-      const text = stripHangupToken(event.transcript || session.agentPartial || '');
+      let text = stripHangupToken(event.transcript || session.agentPartial || '');
+      const stripped = stripDeliveryTags(text);
+      if (stripped.count > 0) {
+        console.log(`[transcript] stripped ${stripped.count} delivery tag(s) callSid=${session.callSid}`);
+      }
+      text = stripped.text;
       if (detectHangupSignal(event.transcript || session.agentPartial || '')) {
         session.hangupRequested = true;
       }
@@ -1011,7 +1033,12 @@ function handleGrokEvent(session, event) {
 
     case 'response.output_text.done':
     case 'response.text.done': {
-      const text = stripHangupToken(event.text || session.agentPartial || '');
+      let text = stripHangupToken(event.text || session.agentPartial || '');
+      const stripped = stripDeliveryTags(text);
+      if (stripped.count > 0) {
+        console.log(`[transcript] stripped ${stripped.count} delivery tag(s) callSid=${session.callSid}`);
+      }
+      text = stripped.text;
       if (detectHangupSignal(event.text || session.agentPartial || '')) {
         session.hangupRequested = true;
       }
@@ -1821,3 +1848,9 @@ server.listen(PORT, () => {
   console.log(`[server] media stream wss://${PUBLIC_HOST || 'PUBLIC_HOST'}/media-stream`);
   console.log(`[server] voice=${XAI_VOICE} model=${XAI_MODEL}`);
 });
+
+// Export for testing
+if (typeof module !== 'undefined' && module.exports) {
+  module.exports = { stripDeliveryTags };
+}
+
