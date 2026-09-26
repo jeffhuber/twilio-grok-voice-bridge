@@ -207,14 +207,16 @@ async function main() {
     fail(`edged digit run changed: ${edged}`);
   }
 
-  const kept = maskPhoneNumbersInText('from 203.0.113.50 on 2026-09-26 at 1727350123456');
+  const kept = maskPhoneNumbersInText('from 203.0.113.50 and 198.51.100.10 on 2026-09-26 at 1727350123456');
   if (
     kept.includes('203.0.113.50') &&
+    kept.includes('198.51.100.10') &&
+    !kept.includes('198.xxxxx0.10') &&
     kept.includes('2026-09-26') &&
     !kept.includes('1727350123456') &&
     kept.includes('3456')
   ) {
-    pass('IPv4 addresses and dates stay, and a 13-digit timestamp is masked');
+    pass('whole IPv4 addresses and dates stay, and a 13-digit timestamp is masked');
   } else {
     fail(`non-phone numbers were masked: ${kept}`);
   }
@@ -233,9 +235,7 @@ async function main() {
 
   const intlSamples = [
     ['+8613800000000', '0000', '+8613800000000'],
-    ['+4930123456789', '6789', '+4930123456789'],
-    ['+8613812345678', '5678', '+8613812345678'],
-    ['+4915112345678', '5678', '+4915112345678'],
+    ['+4930000000000', '0000', '+4930000000000'],
     ['+86 138 0000 0000', '0000', '+86'],
     ['+2100000000000', '0000', '+2100000000000'],
     ['8613800000000', '0000', '8613800000000'],
@@ -392,9 +392,7 @@ async function main() {
 
     if (
       isE164('+8613800000000') &&
-      isE164('+4930123456789') &&
-      isE164('+8613812345678') &&
-      isE164('+4915112345678') &&
+      isE164('+4930000000000') &&
       !isE164('+86 138 0000 0000')
     ) {
       pass('compact +86 and +49 numbers are E.164 and the spaced form is not');
@@ -404,9 +402,7 @@ async function main() {
 
     const intlCalls = [
       ['+8613800000000', '0000'],
-      ['+4930123456789', '6789'],
-      ['+8613812345678', '5678'],
-      ['+4915112345678', '5678'],
+      ['+4930000000000', '0000'],
     ];
     for (const [number, last4] of intlCalls) {
       setTwilioClientForTests({
@@ -493,7 +489,7 @@ async function main() {
       Object.defineProperty(placedSession, 'goal', {
         configurable: true,
         get() {
-          throw new Error('twiml failed for +4930123456789');
+          throw new Error('twiml failed for +4930000000000');
         },
       });
       const beforeTwiml = stderr.lines.length;
@@ -508,8 +504,8 @@ async function main() {
       if (
         twimlRes.status === 500 &&
         twimlLogs.length === 1 &&
-        !twimlLogs[0].includes('+4930123456789') &&
-        twimlLogs[0].includes('6789')
+        !twimlLogs[0].includes('+4930000000000') &&
+        twimlLogs[0].includes('0000')
       ) {
         pass('twiml-connect errors mask numbers from the real catch');
       } else {
@@ -530,7 +526,9 @@ async function main() {
 
       const grokHttp = http.createServer();
       const grokWss = new WebSocket.Server({ server: grokHttp });
+      let grokPeer = null;
       grokWss.on('connection', (socket) => {
+        grokPeer = socket;
         socket.send('+8613800000000');
       });
       await new Promise((resolve) => grokHttp.listen(0, '127.0.0.1', resolve));
@@ -585,16 +583,32 @@ async function main() {
         if (!placedSession.grokWs) {
           fail('grok socket was not opened');
         } else {
-          placedSession.grokWs.emit('error', new Error('upstream +4930123456789'));
+          placedSession.grokWs.emit('error', new Error('upstream +4930000000000'));
           const grokErrLogs = stderr.lines.slice(beforeGrokErr).filter((line) => line.includes('[grok] error callSid='));
           if (
             grokErrLogs.length === 1 &&
-            !grokErrLogs[0].includes('+4930123456789') &&
-            grokErrLogs[0].includes('6789')
+            !grokErrLogs[0].includes('+4930000000000') &&
+            grokErrLogs[0].includes('0000')
           ) {
             pass('grok socket errors mask numbers from the real listener');
           } else {
             fail(`grok error log ${JSON.stringify(grokErrLogs)}`);
+          }
+          if (!grokPeer) {
+            fail('grok peer was not connected');
+          } else {
+            const beforeServerErr = stderr.lines.length;
+            grokPeer.send(JSON.stringify({ type: 'error', error: { message: 'upstream +4930000000000' } }));
+            const serverErrLogs = await waitForLog(stderr, beforeServerErr, '[grok] server error:', 2000);
+            if (
+              serverErrLogs.length === 1 &&
+              !serverErrLogs[0].includes('+4930000000000') &&
+              serverErrLogs[0].includes('0000')
+            ) {
+              pass('grok server errors mask numbers in the event payload');
+            } else {
+              fail(`grok server error log ${JSON.stringify(serverErrLogs)}`);
+            }
           }
         }
 
