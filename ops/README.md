@@ -11,11 +11,11 @@ Supervisor scripts for `node src/server.js` and a named Cloudflare tunnel (`TUNN
 
 Pidfiles live in one directory for both cron and login: `/tmp/twilio-bridge-<uid>`, or `TWILIO_BRIDGE_RUN_DIR` when that is set. `XDG_RUNTIME_DIR` is not used, because it is often set in a login session and unset in cron.
 
-Each pidfile is paired with a record of the process start time from `/proc/<pid>/stat` and a boot id (`/proc/sys/kernel/random/boot_id`, or `btime` from `/proc/stat` when the boot id file is missing). `stop.sh` and `boot.sh` signal a pid only when both still match, so a recycled pid is not killed.
+Each pidfile is paired with a record of the process start time from `/proc/<pid>/stat` and a boot id (`/proc/sys/kernel/random/boot_id`, or `btime` from `/proc/stat` when the boot id file is missing). `stop.sh` and `boot.sh` signal a pid only when both still match, so a recycled pid is not killed. `stop_pid` reads that identity before `SIGTERM` and reads it again before `SIGKILL`. If the pid, start time, or boot id changed during the grace period, it does not send `SIGKILL`.
 
 `/proc`, `flock`, `ss`, and `curl` are required. If any of them is missing, the scripts exit with an error instead of treating the host as healthy. `ss` checks listeners with `ss -tlnH "sport = :<port>"`.
 
-Stopping the bridge or cloudflared never uses a name match across the whole process table, and it does not use `pkill`. A bridge process counts only when argv0 or `/proc/<pid>/exe` is `NODE_BIN` or a program named `node`, one argument is exactly `BRIDGE_ENTRY`, and `/proc/<pid>/cwd` is `BRIDGE_DIR`. `tail -f src/server.js` and `vim src/server.js` do not match: the argument may be exactly `src/server.js`, but argv0 and exe are not node. A parent shell whose `-c` argument contains that path does not match either, because that argument is the whole command, not `src/server.js`. Command lines are split on NUL. cloudflared counts only when the binary is cloudflared (or `CLOUDFLARED_BIN`) and the arguments include `tunnel`, `--config` with `CLOUDFLARED_CONFIG`, `run`, and `TUNNEL_NAME`.
+Stopping the bridge or cloudflared never uses a name match across the whole process table, and it does not use `pkill`. If the bridge port is busy and no supervised child matches the pidfile, `start.sh` signals a process only when `ss` shows that pid listening on the port and the process matches this checkout. A checkout match that does not hold the port is left alone. When `ss` cannot report a listener pid, nothing is signaled. A bridge process counts only when argv0 or `/proc/<pid>/exe` is `NODE_BIN` or a program named `node`, one argument is exactly `BRIDGE_ENTRY`, and `/proc/<pid>/cwd` is `BRIDGE_DIR`. `tail -f src/server.js` and `vim src/server.js` do not match: the argument may be exactly `src/server.js`, but argv0 and exe are not node. A parent shell whose `-c` argument contains that path does not match either, because that argument is the whole command, not `src/server.js`. Command lines are split on NUL. cloudflared counts only when the binary is cloudflared (or `CLOUDFLARED_BIN`) and the arguments include `tunnel`, `--config` with `CLOUDFLARED_CONFIG`, `run`, and `TUNNEL_NAME`.
 
 ## Paths
 
@@ -28,11 +28,12 @@ Stopping the bridge or cloudflared never uses a name match across the whole proc
 | Convenience symlinks | `${BRIDGE_HOME}/services/twilio-bridge/` |
 | cloudflared config | `${CLOUDFLARED_CONFIG}` |
 | Run/pid files | `${TWILIO_BRIDGE_RUN_DIR}` or `/tmp/twilio-bridge-<uid>` |
+| Stop marker | `${BRIDGE_HOME}/var/lib/twilio-bridge/disabled` |
 | Logs | `${TWILIO_BRIDGE_LOG_DIR}` (default `${BRIDGE_HOME}/var/log/twilio-bridge`) |
 
 Node loads `${BRIDGE_DIR}/.env` from the checkout (dotenv, with `override: true`). These scripts refuse to start unless `BRIDGE_ENV_FILE` resolves to that same path. The port probe reads only that file, with the same dotenv parser and `Number(value || 3000)` expression as the app. Log and run directories are created mode `0700` (`umask 077`). `install-boot.sh` writes the resolved `TWILIO_BRIDGE_RUN_DIR` into the profile hook and the `@reboot` line, and rewrites an older hook that does not pin that path.
 
-When `log()` writes, or when a supervisor is about to start a child, a log file larger than `TWILIO_BRIDGE_LOG_MAX_BYTES` (default 5242880) is renamed to the same path with a `.1` suffix and gzipped when `gzip` is on `PATH`. The next rotation replaces that `.1` file. One previous generation is kept.
+Logs are not rotated on a clock. When `log()` writes, or when a supervisor is about to start a child, a log file that is already larger than `TWILIO_BRIDGE_LOG_MAX_BYTES` (default 5242880) is renamed to the same path with a `.1` suffix and gzipped when `gzip` is on `PATH`. A quiet file stays in place until the next write. The next rotation replaces that `.1` file. One previous generation is kept.
 
 ## Environment variables
 
@@ -58,9 +59,9 @@ When `log()` writes, or when a supervisor is about to start a child, a log file 
 
 ## Tunnel authentication
 
-`start.sh` starts the bridge, waits until `PORT` is listening, then requests `http://127.0.0.1:$PORT/health`. cloudflared is started only when the JSON reports `authRequired` true. `supervise.sh` performs that request again before every tunnel launch, including each restart. After every bridge child launch, including each bridge restart, it requests `/health` again unless `SKIP_TUNNEL=1`. If `authRequired` is not true, it stops the tunnel supervisor, the tunnel child, and any identity-matched cloudflared. It does not stop the bridge. The scripts do not read `BRIDGE_API_KEY` or `ALLOW_UNAUTHENTICATED_OPERATOR` out of `.env` to make this decision. A line such as `ALLOW_UNAUTHENTICATED_OPERATOR: 1` is still parsed as `1` by dotenv, and `KEY=#none` becomes empty because `#` starts a comment. Those file lines, and a shell `ALLOW_UNAUTHENTICATED_OPERATOR=1` with an empty `BRIDGE_API_KEY`, do not open the tunnel. Only the running process's `/health` `authRequired` value does.
+`start.sh` starts the bridge, waits until `PORT` is listening, then requests `http://127.0.0.1:$PORT/health`. cloudflared is started only when the JSON reports `authRequired` true. `supervise.sh` performs that request again before every tunnel launch, including each restart. The body is parsed with `JSON.parse`. A boolean `true` passes. The string `"true"` does not. Before a bridge child is launched again, if `tunnel.supervisor.pid` or `tunnel.pid` still matches a live process, cloudflared is stopped first. That decision follows the live pidfile, not the `SKIP_TUNNEL` value captured when the bridge supervisor started. The tunnel is started again only after `/health` reports `authRequired` true. If the check fails, cloudflared stays stopped. The bridge child is left running. The scripts do not read `BRIDGE_API_KEY` or `ALLOW_UNAUTHENTICATED_OPERATOR` out of `.env` to make this decision. A line such as `ALLOW_UNAUTHENTICATED_OPERATOR: 1` is still parsed as `1` by dotenv, and `KEY=#none` becomes empty because `#` starts a comment. Those file lines, and a shell `ALLOW_UNAUTHENTICATED_OPERATOR=1` with an empty `BRIDGE_API_KEY`, do not open the tunnel. Only the running process's `/health` `authRequired` value does.
 
-If the port never opens, or `/health` does not report `authRequired` true, `start.sh` exits non-zero and does not launch cloudflared. `start.sh` holds an exclusive lock on `${TWILIO_BRIDGE_RUN_DIR}/start.lock` for the length of the start.
+If the port never opens, or `/health` does not report `authRequired` true, `start.sh` exits non-zero and does not launch cloudflared. `start.sh` holds an exclusive lock on `${TWILIO_BRIDGE_RUN_DIR}/start.lock` for the length of the start. `boot.sh` holds `${TWILIO_BRIDGE_RUN_DIR}/boot.lock` while it calls `start.sh`. Both locks are closed (`8>&-` and `9>&-`) when a supervisor or its child is spawned, so the supervisor and node do not keep the lock open.
 
 Run with `SKIP_TUNNEL=1` for a local-only process. Do not point a public tunnel at this process unless operator authentication is on. `/health` reports `authRequired` true only when the running process has `BRIDGE_API_KEY` set.
 
@@ -81,9 +82,9 @@ SKIP_TUNNEL=1 ./ops/start.sh
 
 | Event | Survives? |
 |-------|-----------|
-| Child crash (node or cloudflared) | Yes — supervisor restarts with backoff. The tunnel supervisor checks `/health` again before each restart. Each bridge restart checks `/health` again and stops cloudflared when `authRequired` is not true. |
+| Child crash (node or cloudflared) | Yes — supervisor restarts with backoff. The tunnel supervisor checks `/health` again before each restart. A bridge relaunch stops a live tunnel first and starts it again only after `/health` reports `authRequired` true. |
 | Accidental kill of the child only | Yes — supervisor relaunches |
-| `stop.sh` | Stays down. `stop.sh` writes a disabled marker in the run directory. `boot.sh` (login shell and `@reboot`) exits without starting while that marker exists. `start.sh` removes the marker and starts. |
+| `stop.sh` | Stays down. `stop.sh` writes `${BRIDGE_HOME}/var/lib/twilio-bridge/disabled` (mode `0600`). That path is not under `/tmp`, so a reboot does not clear it. `boot.sh` (login shell and `@reboot`) exits without starting while that marker exists. `start.sh` removes the marker and starts. |
 | Logout | Yes — processes were started under `nohup` |
 | Machine restart | `@reboot` cron runs `boot.sh` if cron starts; otherwise the next login shell runs the profile hook. A disabled marker still wins. |
 

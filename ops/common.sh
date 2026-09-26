@@ -39,6 +39,8 @@ else
   RUN_DIR="/tmp/twilio-bridge-$(id -u)"
 fi
 LOG_DIR="${TWILIO_BRIDGE_LOG_DIR:-${BRIDGE_HOME}/var/log/twilio-bridge}"
+# Survives reboot. The run directory is often /tmp and is wiped on restart.
+STATE_DIR="${BRIDGE_HOME}/var/lib/twilio-bridge"
 CLOUDFLARED_BIN="${CLOUDFLARED_BIN:-${BRIDGE_HOME}/.local/bin/cloudflared}"
 CLOUDFLARED_CONFIG="${CLOUDFLARED_CONFIG:-${BRIDGE_HOME}/.cloudflared/config.yml}"
 TUNNEL_NAME="${TUNNEL_NAME:-twilio-bridge}"
@@ -68,8 +70,8 @@ fi
 export PATH="${BRIDGE_HOME}/.local/bin:/usr/local/bin:/usr/bin:/bin:${PATH:-}"
 
 umask 077
-mkdir -p "${RUN_DIR}" "${LOG_DIR}"
-chmod 700 "${RUN_DIR}" "${LOG_DIR}"
+mkdir -p "${RUN_DIR}" "${LOG_DIR}" "${STATE_DIR}"
+chmod 700 "${RUN_DIR}" "${LOG_DIR}" "${STATE_DIR}"
 
 ts() { date -u +'%Y-%m-%dT%H:%M:%SZ'; }
 
@@ -203,8 +205,15 @@ stop_pid() {
   local pid="$1"
   local label="${2:-proc}"
   local grace="${3:-5}"
-  local i
+  local i start="" boot="" now_start="" now_boot=""
   if ! pid_alive "${pid}"; then
+    return 0
+  fi
+  require_proc
+  start="$(proc_starttime "${pid}" || true)"
+  boot="$(proc_boot_id || true)"
+  if [[ -z "${start}" || -z "${boot}" ]]; then
+    log "not signaling ${label} pid=${pid}; identity unreadable"
     return 0
   fi
   log "stopping ${label} pid=${pid}"
@@ -214,10 +223,17 @@ stop_pid() {
     sleep 1
     i=$((i + 1))
   done
-  if pid_alive "${pid}"; then
-    log "killing ${label} pid=${pid}"
-    kill -KILL "${pid}" 2>/dev/null || true
+  if ! pid_alive "${pid}"; then
+    return 0
   fi
+  now_start="$(proc_starttime "${pid}" || true)"
+  now_boot="$(proc_boot_id || true)"
+  if [[ -z "${now_start}" || -z "${now_boot}" || "${now_start}" != "${start}" || "${now_boot}" != "${boot}" ]]; then
+    log "not killing ${label} pid=${pid}; pid identity changed"
+    return 0
+  fi
+  log "killing ${label} pid=${pid}"
+  kill -KILL "${pid}" 2>/dev/null || true
 }
 
 # Signal a recorded pid only when pid and start time still match.
@@ -308,7 +324,23 @@ bridge_accepts_tunnel() {
   require_curl
   body="$(curl -sf --max-time 2 "http://127.0.0.1:${port}/health" || true)"
   [[ -n "${body}" ]] || return 1
-  printf '%s' "${body}" | grep -Eq '"authRequired"[[:space:]]*:[[:space:]]*true([^[:alnum:]_]|$)'
+  if [[ -z "${NODE_BIN}" || ! -x "${NODE_BIN}" ]]; then
+    log "ERROR: node binary not found; set NODE_BIN"
+    return 1
+  fi
+  printf '%s' "${body}" | "${NODE_BIN}" -e '
+    let raw = "";
+    process.stdin.on("data", (chunk) => { raw += chunk; });
+    process.stdin.on("end", () => {
+      try {
+        const parsed = JSON.parse(raw);
+        if (parsed && parsed.authRequired === true) process.exit(0);
+      } catch (err) {
+        process.exit(1);
+      }
+      process.exit(1);
+    });
+  '
 }
 
 wait_for_port() {
@@ -341,10 +373,12 @@ wait_for_tunnel_auth() {
   return 1
 }
 
-disabled_marker() { printf '%s/disabled' "${RUN_DIR}"; }
+disabled_marker() { printf '%s/disabled' "${STATE_DIR}"; }
 skip_tunnel_marker() { printf '%s/skip-tunnel' "${RUN_DIR}"; }
 
 mark_disabled() {
+  mkdir -p "${STATE_DIR}"
+  chmod 700 "${STATE_DIR}"
   printf '1\n' > "$(disabled_marker)"
   chmod 600 "$(disabled_marker)"
 }
@@ -459,4 +493,87 @@ stop_matching_processes() {
       stop_pid "${pid}" "${label}" 5
     fi
   done
+}
+
+# Listener pids for a TCP port, from ss. Empty when ss cannot see a pid.
+port_listener_pids() {
+  local port="$1"
+  require_ss
+  ss -tlnpH "sport = :${port}" 2>/dev/null | grep -oE 'pid=[0-9]+' | cut -d= -f2 | sort -u || true
+}
+
+# Stop a matching bridge only when that process is the listener. A checkout
+# match that does not hold the port is left alone.
+reclaim_bridge_port() {
+  local port="$1"
+  local our_child holders pid signaled=0
+  our_child="$(read_pidfile "${RUN_DIR}/bridge.pid")"
+  if pid_is_ours "${RUN_DIR}/bridge.pid"; then
+    return 0
+  fi
+  require_ss
+  if [[ ! "${port}" =~ ^[0-9]+$ ]]; then
+    log "ERROR: PORT must be numeric (got a non-numeric value)"
+    exit 1
+  fi
+  holders="$(ss -tlnH "sport = :${port}" 2>/dev/null || true)"
+  if [[ -z "${holders}" ]]; then
+    return 0
+  fi
+  log "port ${port} busy without a supervised child — reclaiming the listener from this checkout only"
+  if [[ -n "${our_child}" ]] && pid_alive "${our_child}" && ! pid_is_ours "${RUN_DIR}/bridge.pid"; then
+    log "bridge pidfile pid=${our_child} failed identity check; not signaling it"
+  fi
+  while IFS= read -r pid; do
+    [[ -n "${pid}" ]] || continue
+    if bridge_process_matches "${pid}"; then
+      stop_pid "${pid}" "foreign-bridge" 5
+      signaled=1
+    else
+      log "port ${port} listener pid=${pid} is not this checkout; not signaling"
+    fi
+  done < <(port_listener_pids "${port}")
+  if [[ "${signaled}" -eq 0 ]]; then
+    log "port ${port} is busy; no listener pid matched this checkout, so nothing was signaled"
+  fi
+}
+
+tunnel_stack_live() {
+  if pid_is_ours "${RUN_DIR}/tunnel.supervisor.pid"; then
+    return 0
+  fi
+  pid_is_ours "${RUN_DIR}/tunnel.pid"
+}
+
+stop_tunnel_stack() {
+  stop_recorded_pid "${RUN_DIR}/tunnel.supervisor.pid" "tunnel-supervisor" 2
+  stop_recorded_pid "${RUN_DIR}/tunnel.pid" "tunnel-child" 2
+  stop_matching_processes cloudflared_process_matches "cloudflared"
+}
+
+# Spawn a supervisor without inheriting the start.sh (fd 8) or boot.sh (fd 9) locks.
+start_supervisor() {
+  local name="$1"
+  shift
+  local sup_pidfile="${RUN_DIR}/${name}.supervisor.pid"
+  local attempt=0
+  if pid_is_ours "${sup_pidfile}"; then
+    log "${name} supervisor already running pid=$(read_pidfile "${sup_pidfile}")"
+    return 0
+  fi
+  clear_pidfile "${sup_pidfile}"
+  if [[ ! -x "${OPS_DIR}/supervise.sh" ]]; then
+    chmod +x "${OPS_DIR}/supervise.sh"
+  fi
+  nohup "${OPS_DIR}/supervise.sh" "${name}" -- "$@" 8>&- 9>&- </dev/null >/dev/null 2>>"${LOG_DIR}/${name}.supervisor.log" &
+  while (( attempt < 10 )); do
+    if [[ -f "${sup_pidfile}.start" ]] && pid_is_ours "${sup_pidfile}"; then
+      log "started ${name} supervisor pid=$(read_pidfile "${sup_pidfile}")"
+      return 0
+    fi
+    attempt=$((attempt + 1))
+    sleep 0.5
+  done
+  log "ERROR: failed to start ${name} supervisor"
+  return 1
 }

@@ -11,6 +11,8 @@ tail_parent=""
 tail_child=""
 tunnel_sleeper=""
 tunnel_sup_sleeper=""
+lock_sup=""
+tunnel_restart_sup=""
 created_env=0
 
 cleanup() {
@@ -41,6 +43,28 @@ cleanup() {
     kill "${tunnel_sup_sleeper}" 2>/dev/null || true
     wait "${tunnel_sup_sleeper}" 2>/dev/null || true
   fi
+  if [[ -n "${lock_sup}" ]]; then
+    kill -TERM "${lock_sup}" 2>/dev/null || true
+    wait "${lock_sup}" 2>/dev/null || true
+  fi
+  if [[ -n "${tunnel_restart_sup}" ]]; then
+    kill -TERM "${tunnel_restart_sup}" 2>/dev/null || true
+    wait "${tunnel_restart_sup}" 2>/dev/null || true
+  fi
+  if [[ -n "${RUN_DIR:-}" && -f "${RUN_DIR}/tunnel.supervisor.pid" ]]; then
+    extra_pid="$(tr -d '[:space:]' < "${RUN_DIR}/tunnel.supervisor.pid" || true)"
+    if [[ -n "${extra_pid}" ]]; then
+      kill -TERM "${extra_pid}" 2>/dev/null || true
+      wait "${extra_pid}" 2>/dev/null || true
+    fi
+  fi
+  if [[ -n "${RUN_DIR:-}" && -f "${RUN_DIR}/bridge.supervisor.pid" ]]; then
+    extra_pid="$(tr -d '[:space:]' < "${RUN_DIR}/bridge.supervisor.pid" || true)"
+    if [[ -n "${extra_pid}" ]]; then
+      kill -TERM "${extra_pid}" 2>/dev/null || true
+      wait "${extra_pid}" 2>/dev/null || true
+    fi
+  fi
   if [[ "${created_env}" == "1" ]]; then
     rm -f "${ROOT}/.env"
   fi
@@ -54,7 +78,7 @@ export BRIDGE_HOME="${TMP}/home"
 unset BRIDGE_ENV_FILE
 mkdir -p "${BRIDGE_HOME}" "${TMP}/linkdir" "${TMP}/log"
 if [[ ! -f "${ROOT}/.env" ]]; then
-  printf 'PORT=3000\n' > "${ROOT}/.env"
+  printf 'PORT=9\n' > "${ROOT}/.env"
   created_env=1
 fi
 
@@ -241,11 +265,11 @@ server.listen(port, '127.0.0.1', () => {
 });
 EOF
 printf 'closed\n' > "${TMP}/health-mode"
-real_port="$(bridge_port)"
-if port_listening "${real_port}"; then
-  fail "port ${real_port} is already in use; cannot bind the health fixture"
+if [[ "${created_env}" == "1" ]]; then
+  node "${TMP}/health.js" "${TMP}/health-mode" 0 > "${TMP}/health.port" &
+else
+  node "${TMP}/health.js" "${TMP}/health-mode" "$(bridge_port)" > "${TMP}/health.port" &
 fi
-node "${TMP}/health.js" "${TMP}/health-mode" "${real_port}" > "${TMP}/health.port" &
 health_pid=$!
 for _ in $(seq 1 50); do
   if [[ -s "${TMP}/health.port" ]]; then
@@ -254,8 +278,15 @@ for _ in $(seq 1 50); do
   sleep 0.05
 done
 hport="$(tr -d '[:space:]' < "${TMP}/health.port")"
-if [[ -z "${hport}" || "${hport}" != "${real_port}" ]]; then
-  fail "health fixture did not listen on the checkout port"
+if [[ -z "${hport}" || ! "${hport}" =~ ^[0-9]+$ ]]; then
+  fail "health fixture did not bind a port"
+fi
+if [[ "${created_env}" == "1" ]]; then
+  printf 'PORT=%s\n' "${hport}" > "${ROOT}/.env"
+fi
+real_port="$(bridge_port)"
+if [[ "${hport}" != "${real_port}" ]]; then
+  fail "health fixture port ${hport} is not the checkout port ${real_port}"
 fi
 printf '%s\n' \
   'ALLOW_UNAUTHENTICATED_OPERATOR: 1' \
@@ -478,6 +509,25 @@ tail_parent=""
 tail_child=""
 echo "ok live tail is not the bridge"
 
+if [[ "$(disabled_marker)" != "${BRIDGE_HOME}/var/lib/twilio-bridge/disabled" ]]; then
+  fail "disabled marker is not under BRIDGE_HOME: $(disabled_marker)"
+fi
+if [[ "$(disabled_marker)" == "${RUN_DIR}/"* ]]; then
+  fail "disabled marker is inside the run directory"
+fi
+mark_disabled
+rm -rf "${RUN_DIR}"
+mkdir -p "${RUN_DIR}"
+chmod 700 "${RUN_DIR}"
+if ! is_disabled; then
+  fail "disabled marker disappeared when the run directory was removed"
+fi
+clear_disabled
+if is_disabled; then
+  fail "clear_disabled left the persistent marker"
+fi
+echo "ok disabled marker survives run dir removal"
+
 mark_disabled
 : > "${LOG_DIR}/ops.log"
 set +e
@@ -626,10 +676,11 @@ if [[ "${curl_rc}" -ne 1 ]]; then
 fi
 echo "ok missing curl fails loudly"
 
-export CLOUDFLARED_BIN="${TMP}/cloudflared-not-real"
+export CLOUDFLARED_BIN="${TMP}/tunnel-bin"
 export CLOUDFLARED_CONFIG="${TMP}/cloudflared-not-real.yml"
 export TUNNEL_NAME="ops-test-tunnel-not-real"
 printf 'tunnel: example\n' > "${CLOUDFLARED_CONFIG}"
+rm -f "${TMP}/tunnel-ran"
 
 printf 'closed\n' > "${TMP}/health-mode"
 sleep 60 &
@@ -643,7 +694,8 @@ unset SKIP_TUNNEL
 sup_pid=$!
 stopped=0
 for _ in $(seq 1 80); do
-  if ! kill -0 "${tunnel_sleeper}" 2>/dev/null && ! kill -0 "${tunnel_sup_sleeper}" 2>/dev/null; then
+  if ! kill -0 "${tunnel_sleeper}" 2>/dev/null && ! kill -0 "${tunnel_sup_sleeper}" 2>/dev/null \
+    && grep -q 'leaving cloudflared stopped' "${LOG_DIR}/ops.log"; then
     stopped=1
     break
   fi
@@ -652,8 +704,21 @@ done
 if [[ "${stopped}" -ne 1 ]]; then
   fail "bridge restart left the tunnel running when authRequired was false"
 fi
-if ! grep -q 'stopping cloudflared because' "${LOG_DIR}/ops.log"; then
-  fail "bridge restart did not log that cloudflared was stopped"
+if ! grep -q 'stopping cloudflared before bridge relaunch' "${LOG_DIR}/ops.log"; then
+  fail "bridge restart did not stop cloudflared before the relaunch"
+fi
+if ! grep -q 'leaving cloudflared stopped' "${LOG_DIR}/ops.log"; then
+  fail "failed health check restarted cloudflared"
+fi
+if [[ -f "${TMP}/tunnel-ran" ]]; then
+  fail "failed health check launched cloudflared"
+fi
+if ! awk '
+  /stopping cloudflared before bridge relaunch/ { stopped_at = NR }
+  /launching bridge child/ && stopped_at && NR > stopped_at { launched_after = 1 }
+  END { exit !launched_after }
+' "${LOG_DIR}/ops.log"; then
+  fail "bridge child was launched before cloudflared was stopped"
 fi
 bridge_child="$(read_pidfile "${RUN_DIR}/bridge.pid")"
 if ! kill -0 "${bridge_child}" 2>/dev/null; then
@@ -666,6 +731,7 @@ tunnel_sleeper=""
 tunnel_sup_sleeper=""
 
 printf 'open\n' > "${TMP}/health-mode"
+rm -f "${TMP}/tunnel-ran"
 sleep 60 &
 tunnel_sleeper=$!
 write_pidfile "${RUN_DIR}/tunnel.pid" "${tunnel_sleeper}"
@@ -674,35 +740,71 @@ tunnel_sup_sleeper=$!
 write_pidfile "${RUN_DIR}/tunnel.supervisor.pid" "${tunnel_sup_sleeper}"
 "${ROOT}/ops/supervise.sh" bridge -- sleep 60 >"${TMP}/bridge-open.out" 2>&1 &
 sup_pid=$!
-sleep 1
-if ! kill -0 "${tunnel_sleeper}" 2>/dev/null || ! kill -0 "${tunnel_sup_sleeper}" 2>/dev/null; then
-  fail "bridge restart stopped the tunnel when authRequired was true"
+restarted=0
+for _ in $(seq 1 80); do
+  if [[ -f "${TMP}/tunnel-ran" ]] && grep -q 'restarting cloudflared after authRequired true' "${LOG_DIR}/ops.log"; then
+    restarted=1
+    break
+  fi
+  sleep 0.25
+done
+if [[ "${restarted}" -ne 1 ]]; then
+  fail "authRequired true did not restart cloudflared after the bridge relaunch"
 fi
+if kill -0 "${tunnel_sleeper}" 2>/dev/null || kill -0 "${tunnel_sup_sleeper}" 2>/dev/null; then
+  fail "bridge relaunch left the previous tunnel up during the health check"
+fi
+tunnel_restart_sup="$(read_pidfile "${RUN_DIR}/tunnel.supervisor.pid")"
 kill -TERM "${sup_pid}" 2>/dev/null || true
+if [[ -n "${tunnel_restart_sup}" ]]; then
+  kill -TERM "${tunnel_restart_sup}" 2>/dev/null || true
+  wait "${tunnel_restart_sup}" 2>/dev/null || true
+fi
 wait "${sup_pid}" 2>/dev/null || true
 sup_pid=""
-kill "${tunnel_sleeper}" "${tunnel_sup_sleeper}" 2>/dev/null || true
-wait "${tunnel_sleeper}" 2>/dev/null || true
-wait "${tunnel_sup_sleeper}" 2>/dev/null || true
 tunnel_sleeper=""
 tunnel_sup_sleeper=""
 
 printf 'closed\n' > "${TMP}/health-mode"
+rm -f "${TMP}/tunnel-ran"
 sleep 60 &
 tunnel_sleeper=$!
 write_pidfile "${RUN_DIR}/tunnel.pid" "${tunnel_sleeper}"
 SKIP_TUNNEL=1 "${ROOT}/ops/supervise.sh" bridge -- sleep 30 >"${TMP}/bridge-skip.out" 2>&1 &
 sup_pid=$!
-sleep 1
-if ! kill -0 "${tunnel_sleeper}" 2>/dev/null; then
-  fail "SKIP_TUNNEL=1 stopped the tunnel on bridge start"
+stopped=0
+for _ in $(seq 1 80); do
+  if ! kill -0 "${tunnel_sleeper}" 2>/dev/null; then
+    stopped=1
+    break
+  fi
+  sleep 0.25
+done
+if [[ "${stopped}" -ne 1 ]]; then
+  fail "SKIP_TUNNEL=1 left a live tunnel pidfile up across a bridge relaunch"
+fi
+if [[ -f "${TMP}/tunnel-ran" ]]; then
+  fail "SKIP_TUNNEL=1 restarted cloudflared when authRequired was false"
 fi
 kill -TERM "${sup_pid}" 2>/dev/null || true
 wait "${sup_pid}" 2>/dev/null || true
 sup_pid=""
-kill "${tunnel_sleeper}" 2>/dev/null || true
-wait "${tunnel_sleeper}" 2>/dev/null || true
 tunnel_sleeper=""
+unset SKIP_TUNNEL
+
+clear_pidfile "${RUN_DIR}/tunnel.pid"
+clear_pidfile "${RUN_DIR}/tunnel.supervisor.pid"
+stops_before="$(grep -c 'stopping cloudflared before bridge relaunch' "${LOG_DIR}/ops.log" || true)"
+SKIP_TUNNEL=1 "${ROOT}/ops/supervise.sh" bridge -- sleep 20 >"${TMP}/bridge-skip-quiet.out" 2>&1 &
+sup_pid=$!
+sleep 1
+stops_after="$(grep -c 'stopping cloudflared before bridge relaunch' "${LOG_DIR}/ops.log" || true)"
+if [[ "${stops_before}" != "${stops_after}" ]]; then
+  fail "bridge relaunch stopped a tunnel when no tunnel pidfile was live"
+fi
+kill -TERM "${sup_pid}" 2>/dev/null || true
+wait "${sup_pid}" 2>/dev/null || true
+sup_pid=""
 unset SKIP_TUNNEL
 echo "ok bridge restart health gate"
 
@@ -796,5 +898,166 @@ if ! grep -Fq "TWILIO_BRIDGE_RUN_DIR=${TMP}/frozen-run" "${TMP}/cron-capture"; t
   fail "rewritten crontab did not pin TWILIO_BRIDGE_RUN_DIR"
 fi
 echo "ok install pins RUN_DIR"
+
+(
+  sleep 30 &
+  victim=$!
+  printf '1\n' > "${TMP}/starttime-phase"
+  # shellcheck disable=SC2317
+  proc_starttime() {
+    local phase
+    phase="$(tr -d '[:space:]' < "${TMP}/starttime-phase")"
+    if [[ "$1" == "${victim}" ]]; then
+      if [[ "${phase}" == "1" ]]; then
+        printf '2\n' > "${TMP}/starttime-phase"
+        printf '100\n'
+        return 0
+      fi
+      printf '200\n'
+      return 0
+    fi
+    return 1
+  }
+  # shellcheck disable=SC2317
+  proc_boot_id() { printf 'boot-a\n'; }
+  # shellcheck disable=SC2317
+  kill() {
+    if [[ "${1:-}" == "-0" ]]; then
+      builtin kill -0 "${2}"
+      return
+    fi
+    printf '%s\n' "$*" >> "${TMP}/kills-changed"
+    return 0
+  }
+  stop_pid "${victim}" "recycle" 0
+  builtin kill -TERM "${victim}" 2>/dev/null || true
+  wait "${victim}" 2>/dev/null || true
+)
+if ! grep -q -- '-TERM' "${TMP}/kills-changed"; then
+  fail "SIGTERM was not sent before the identity recheck"
+fi
+if grep -q -- '-KILL' "${TMP}/kills-changed"; then
+  fail "SIGKILL ran after pid start time changed"
+fi
+if ! grep -q 'pid identity changed' "${LOG_DIR}/ops.log"; then
+  fail "changed identity was not logged"
+fi
+(
+  sleep 30 &
+  victim=$!
+  # shellcheck disable=SC2317
+  proc_starttime() {
+    if [[ "$1" == "${victim}" ]]; then
+      printf '100\n'
+      return 0
+    fi
+    return 1
+  }
+  # shellcheck disable=SC2317
+  proc_boot_id() { printf 'boot-a\n'; }
+  # shellcheck disable=SC2317
+  kill() {
+    if [[ "${1:-}" == "-0" ]]; then
+      builtin kill -0 "${2}"
+      return
+    fi
+    printf '%s\n' "$*" >> "${TMP}/kills-stable"
+    return 0
+  }
+  stop_pid "${victim}" "stable" 0
+  builtin kill -TERM "${victim}" 2>/dev/null || true
+  wait "${victim}" 2>/dev/null || true
+)
+if ! grep -q -- '-KILL' "${TMP}/kills-stable"; then
+  fail "SIGKILL was skipped when pid identity was unchanged"
+fi
+echo "ok SIGKILL rechecks pid identity"
+
+(
+  # shellcheck disable=SC2317
+  ss() {
+    if [[ "$*" == *-tlnpH* ]]; then
+      printf '%s\n' 'LISTEN 0 128 127.0.0.1:9 0.0.0.0:* users:(("node",pid=9999,fd=3))'
+      return 0
+    fi
+    printf '%s\n' 'LISTEN 0 128 127.0.0.1:9 0.0.0.0:*'
+  }
+  # shellcheck disable=SC2317
+  bridge_process_matches() { [[ "$1" == "8888" || "$1" == "9999" ]]; }
+  # shellcheck disable=SC2317
+  stop_pid() { printf '%s\n' "$1" >> "${TMP}/reclaim-stopped"; }
+  : > "${TMP}/reclaim-stopped"
+  reclaim_bridge_port 9
+)
+if [[ "$(tr -d '[:space:]' < "${TMP}/reclaim-stopped")" != "9999" ]]; then
+  fail "reclaim signaled a process that was not the listener: $(cat "${TMP}/reclaim-stopped")"
+fi
+(
+  # shellcheck disable=SC2317
+  ss() {
+    if [[ "$*" == *-tlnpH* ]]; then
+      printf '%s\n' 'users:(("other",pid=7777,fd=3))'
+      return 0
+    fi
+    printf '%s\n' 'LISTEN 0 128 127.0.0.1:9 0.0.0.0:*'
+  }
+  # shellcheck disable=SC2317
+  bridge_process_matches() { [[ "$1" == "8888" ]]; }
+  # shellcheck disable=SC2317
+  stop_pid() { printf '%s\n' "$1" >> "${TMP}/reclaim-foreign"; }
+  reclaim_bridge_port 9
+)
+if [[ -s "${TMP}/reclaim-foreign" ]]; then
+  fail "reclaim signaled a checkout process that does not hold the port"
+fi
+echo "ok reclaim requires the listener pid"
+
+if ! grep -q '8>&-' "${ROOT}/ops/common.sh" || ! grep -q '9>&-' "${ROOT}/ops/common.sh"; then
+  fail "start_supervisor does not close lock fds"
+fi
+if ! grep -q '8>&-' "${ROOT}/ops/supervise.sh" || ! grep -q '9>&-' "${ROOT}/ops/supervise.sh"; then
+  fail "child exec does not close lock fds"
+fi
+bash -c '
+  exec 8>"$1/start.lock"
+  exec 9>"$1/boot.lock"
+  flock -n 8 || exit 2
+  flock -n 9 || exit 3
+  nohup "$2/ops/supervise.sh" bridge -- sleep 30 8>&- 9>&- </dev/null >/dev/null 2>>"$1/locksup.log" &
+  echo $! > "$1/locksup.pid"
+' bash "${TMP}" "${ROOT}"
+lock_sup="$(tr -d '[:space:]' < "${TMP}/locksup.pid")"
+ready=0
+for _ in $(seq 1 40); do
+  if [[ -f "${RUN_DIR}/bridge.pid" ]] && kill -0 "${lock_sup}" 2>/dev/null; then
+    ready=1
+    break
+  fi
+  sleep 0.1
+done
+if [[ "${ready}" -ne 1 ]]; then
+  fail "lock-fd supervisor did not start"
+fi
+if ! bash -c 'exec 8>"$1"; flock -w 2 8' bash "${TMP}/start.lock"; then
+  fail "spawned supervisor kept the start lock open"
+fi
+if ! bash -c 'exec 9>"$1"; flock -n 9' bash "${TMP}/boot.lock"; then
+  fail "spawned supervisor kept the boot lock open"
+fi
+lock_child="$(read_pidfile "${RUN_DIR}/bridge.pid")"
+for pid in "${lock_sup}" "${lock_child}"; do
+  for fd in /proc/"${pid}"/fd/*; do
+    target="$(readlink "${fd}" 2>/dev/null || true)"
+    case "${target}" in
+      *start.lock|*boot.lock)
+        fail "pid ${pid} inherited lock fd ${target}"
+        ;;
+    esac
+  done
+done
+kill -TERM "${lock_sup}" 2>/dev/null || true
+wait "${lock_sup}" 2>/dev/null || true
+lock_sup=""
+echo "ok lock fds are not inherited"
 
 echo "All ops tests passed"

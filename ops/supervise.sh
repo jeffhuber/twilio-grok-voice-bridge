@@ -66,29 +66,41 @@ while true; do
       continue
     fi
   fi
+
+  # A live tunnel pidfile, not the SKIP_TUNNEL value from process start, decides
+  # this. Stop cloudflared before the bridge child is exec'd, and bring it back
+  # only after /health reports authRequired true.
+  tunnel_held=0
+  if [[ "${NAME}" == "bridge" ]] && tunnel_stack_live; then
+    log "stopping cloudflared before bridge relaunch"
+    stop_tunnel_stack
+    tunnel_held=1
+  fi
+
   printf '[%s] launching child\n' "$(ts)" >> "${SUP_LOG}"
+  log "launching ${NAME} child"
   started_at=$(date +%s)
   set +e
   (
     if [[ "${NAME}" == "bridge" ]]; then
       cd "${BRIDGE_DIR}"
     fi
-    exec "${CMD[@]}"
+    exec 8>&- 9>&- "${CMD[@]}"
   ) >> "${CHILD_LOG}" 2>&1 &
   child_pid=$!
   set -e
   write_pidfile "${CHILD_PIDFILE}" "${child_pid}"
   printf '[%s] child pid=%s\n' "$(ts)" "${child_pid}" >> "${SUP_LOG}"
 
-  # Each bridge start, including a restart, must see authRequired true or the
-  # tunnel comes down. The bridge child itself is left running.
-  if [[ "${NAME}" == "bridge" && "${SKIP_TUNNEL:-}" != "1" ]]; then
+  if [[ "${NAME}" == "bridge" && "${tunnel_held}" == "1" ]]; then
     port="$(bridge_port)"
-    if ! wait_for_tunnel_auth "${port}" 10; then
-      log "stopping cloudflared because http://127.0.0.1:${port}/health authRequired is not true"
-      stop_recorded_pid "${RUN_DIR}/tunnel.supervisor.pid" "tunnel-supervisor" 2
-      stop_recorded_pid "${RUN_DIR}/tunnel.pid" "tunnel-child" 2
-      stop_matching_processes cloudflared_process_matches "cloudflared"
+    if wait_for_tunnel_auth "${port}" 10; then
+      log "restarting cloudflared after authRequired true"
+      if ! start_supervisor tunnel "${CLOUDFLARED_BIN}" tunnel --config "${CLOUDFLARED_CONFIG}" run "${TUNNEL_NAME}"; then
+        log "ERROR: cloudflared did not restart after the health check"
+      fi
+    else
+      log "leaving cloudflared stopped because http://127.0.0.1:${port}/health authRequired is not true"
     fi
   fi
 
