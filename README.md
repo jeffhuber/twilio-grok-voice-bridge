@@ -51,9 +51,9 @@ Body JSON:
 - `style` (optional) — `support` | `restaurant-book` | `custom`
 - `voice` (optional) — xAI voice id or alias
 - `softContinue` (optional bool)
-- `openerOnConnect` (optional boolean) — omit to follow `OPENER_ON_CONNECT` (default: greet once). `false` skips that greeting. `true` forces it even when `OPENER_ON_CONNECT=0`.
+- `openerOnConnect` (optional boolean) — omit to follow `DISABLE_OPENER_ON_CONNECT` (default: greet once). `false` skips that greeting. `true` forces it even when `DISABLE_OPENER_ON_CONNECT` is exactly `1`. Any other JSON type, including `"false"`, `0`, and `null`, is 400.
 
-Outbound calls greet once the model has accepted the initial audio format. On socket open the bridge sends `session.update` with `audio/pcmu` input and output. The first `session.updated` after that sends one `response.create`. `session.created` does not greet, and later `session.updated` events (voice, VAD, steer) do not greet again. Set `OPENER_ON_CONNECT=0` to disable. Only the exact value `0` disables; other values, including unset, leave the greeting on.
+Outbound calls greet once the model has accepted `audio/pcmu` output. On socket open the bridge sends `session.update` with `audio/pcmu` input and output and waits for that ack. The greeting is one `response.create`, and only when that `session.updated` event reports output format `audio/pcmu`. `session.created` does not greet. A later `session.updated` (voice, VAD, steer) does not greet. An `error` event, or a thrown send of that first `session.update`, clears the wait so a steer ack cannot greet. The greeting is also skipped when the callee is already speaking or already has a transcript line. Set `DISABLE_OPENER_ON_CONNECT` to exactly `1` to disable the default. Other values, including unset, `0`, and `false`, leave the greeting on. This matches the other flags, which turn on only for the exact string `1`.
 
 Returns `callSid`, `style`, `voice`, etc.
 
