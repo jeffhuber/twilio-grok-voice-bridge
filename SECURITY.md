@@ -14,12 +14,12 @@ All control-plane routes (`/call`, `/steer`, `/hangup`, `/voice`, `/transcript`)
 
 **Required:** Set `BRIDGE_API_KEY` to a strong random secret (32+ bytes) before deploying publicly.
 
-**Fail-closed by default:** If `BRIDGE_API_KEY` is not set, the server exits on startup unless the explicit escape hatch `ALLOW_UNAUTHENTICATED_OPERATOR=1` is set. The escape hatch is intended ONLY for localhost demos and displays loud security warnings on startup. Never deploy publicly with `ALLOW_UNAUTHENTICATED_OPERATOR=1`.
+**Fail-closed by default:** If `BRIDGE_API_KEY` is not set, the server exits on startup unless the explicit escape hatch `ALLOW_UNAUTHENTICATED_OPERATOR=1` is set. The escape hatch is intended ONLY for localhost demos and displays loud security warnings on startup. Never deploy publicly with `ALLOW_UNAUTHENTICATED_OPERATOR=1`. The process listens on all interfaces, so that escape hatch leaves `/call`, `/steer`, `/hangup`, and `/transcript` reachable by anyone who can reach the host. It does not enable media HMAC: signatures are not minted or verified unless `BRIDGE_API_KEY` is set, even when `MEDIA_STREAM_SECRET` is set. Calls therefore cannot complete the media handshake in open mode.
 
 ### 2. Media Stream WebSocket Security
 
 **HMAC-SHA256 signature authentication:**
-- Cryptographically signed authentication. The HMAC key is `MEDIA_STREAM_SECRET` when that value is non-empty after trimming, otherwise `BRIDGE_API_KEY`
+- Cryptographically signed authentication. Both keys are read once at startup. The HMAC key is `MEDIA_STREAM_SECRET` when that value is non-empty after trimming and `BRIDGE_API_KEY` is set; otherwise it is `BRIDGE_API_KEY`. `MEDIA_STREAM_SECRET` alone is not enough: mint and verify both refuse when `BRIDGE_API_KEY` is unset. A non-empty `BRIDGE_API_KEY` or `MEDIA_STREAM_SECRET` shorter than 32 bytes logs a startup warning that does not print the secret, and is still accepted. An empty key does not log that short-key warning.
 - Signatures computed over `callSid:timestamp`, preventing forgery
 - Unforgeable: requires knowledge of that HMAC key to generate valid signatures
 - Signature generated at `/twiml-connect` when Twilio fetches TwiML
@@ -67,7 +67,7 @@ Sensitive environment variables should never be committed:
 - `TWILIO_AUTH_TOKEN`
 - `XAI_API_KEY`
 - `BRIDGE_API_KEY`
-- `MEDIA_STREAM_SECRET` (media HMAC key when non-empty after trimming; otherwise HMAC uses `BRIDGE_API_KEY`)
+- `MEDIA_STREAM_SECRET` (dedicated media HMAC key only when `BRIDGE_API_KEY` is also set; ignored for mint and verify when the operator key is unset)
 
 Use `.env` (gitignored) or secret management systems for deployments.
 
@@ -131,11 +131,10 @@ Use `.env` (gitignored) or secret management systems for deployments.
   
 **Operator route compromise:**
 - If `BRIDGE_API_KEY` is compromised, an attacker can place calls via `/call` (spending the Twilio account) and can mint media HMAC signatures when `MEDIA_STREAM_SECRET` is empty
-- If the media HMAC key is compromised (`MEDIA_STREAM_SECRET` when that value is non-empty after trimming, otherwise `BRIDGE_API_KEY`), an attacker can generate valid media signatures
+- If the media HMAC key is compromised (`MEDIA_STREAM_SECRET` when that value is non-empty after trimming and `BRIDGE_API_KEY` is set, otherwise `BRIDGE_API_KEY`), an attacker can generate valid media signatures
 - **Mitigations:**
-  - Rotate the compromised key immediately. Rotating the HMAC key is a hard cut: signatures already issued fail verification
-  - Set `MEDIA_STREAM_SECRET` so media HMAC can rotate without rotating the operator key
-  - Use strong random keys (32+ bytes). A shorter `MEDIA_STREAM_SECRET` logs a startup warning and is still accepted
+  - Rotate the compromised key immediately. Rotating the HMAC key is a hard cut: signatures already issued fail verification. `MEDIA_STREAM_SECRET` exists so media HMAC can rotate without rotating the operator key; it is not a substitute for setting `BRIDGE_API_KEY`
+  - Use strong random keys (32+ bytes). A shorter non-empty `BRIDGE_API_KEY` or `MEDIA_STREAM_SECRET` logs a startup warning and is still accepted. The warning does not print the secret
   - Monitor Twilio billing for unexpected usage
   - Add additional controls: IP allowlists, Cloudflare Access, etc.
 
@@ -164,14 +163,14 @@ Use `.env` (gitignored) or secret management systems for deployments.
 ### Security Properties
 
 The HMAC-based authentication provides:
-- ✅ **Unforgeability:** Signatures cannot be generated without the HMAC key (`MEDIA_STREAM_SECRET` when non-empty after trimming, otherwise `BRIDGE_API_KEY`)
+- ✅ **Unforgeability:** Signatures cannot be generated without the HMAC key (`MEDIA_STREAM_SECRET` when non-empty after trimming and `BRIDGE_API_KEY` is set, otherwise `BRIDGE_API_KEY`). They are not generated at all when `BRIDGE_API_KEY` is unset
 - ✅ **Cryptographic binding:** CallSid is bound into the signature; tampering invalidates it
 - ✅ **Time-limited:** Signatures expire after `MEDIA_AUTH_WINDOW_MS` (default 2 minutes)
 - ✅ **Single-use:** Signatures can only be claimed once
 - ✅ **X-Twilio-Signature validation:** `/twiml-connect` protected when `TWILIO_AUTH_TOKEN` is set
 
 **Deployment requirements:**
-- Requires an HMAC key for signature generation: `MEDIA_STREAM_SECRET`, or `BRIDGE_API_KEY` when that dedicated value is empty
+- Requires `BRIDGE_API_KEY` for signature generation. `MEDIA_STREAM_SECRET` is an optional separate rotation key and is not used unless the operator key is set
 - Sticky/single-node deployment required (in-memory state)
 - HTTPS/WSS required for Twilio Media Streams
 
@@ -181,7 +180,7 @@ The HMAC-based authentication provides:
 - Rate limiting is not implemented; add rate limiting at the reverse proxy level
 - DDoS protection should be handled by your edge (Cloudflare, AWS Shield, etc.)
 - No intrusion detection; monitor logs for anomalies
-- When `MEDIA_STREAM_SECRET` is empty, `BRIDGE_API_KEY` serves both HTTP auth and HMAC signing. Set a separate `MEDIA_STREAM_SECRET` (32+ bytes) so those keys can rotate independently
+- When `MEDIA_STREAM_SECRET` is empty, `BRIDGE_API_KEY` serves both HTTP auth and HMAC signing. Set a separate `MEDIA_STREAM_SECRET` (32+ bytes) so those keys can rotate independently. The dedicated secret does not authorize media signatures by itself
 
 ## Audit History
 

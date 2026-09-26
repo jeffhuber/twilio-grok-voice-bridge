@@ -21,6 +21,8 @@ const TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN;
 const TWILIO_FROM_NUMBER = process.env.TWILIO_FROM_NUMBER;
 const XAI_API_KEY = process.env.XAI_API_KEY;
 const BRIDGE_API_KEY = process.env.BRIDGE_API_KEY;
+/** Trimmed once at startup. Later process.env changes do not affect HMAC. */
+const MEDIA_STREAM_SECRET = String(process.env.MEDIA_STREAM_SECRET || '').trim();
 const ALLOW_UNAUTHENTICATED_OPERATOR = process.env.ALLOW_UNAUTHENTICATED_OPERATOR === '1';
 const ENABLE_RECORDING = process.env.ENABLE_RECORDING === '1';
 const SKIP_AI_DISCLOSURE = process.env.SKIP_AI_DISCLOSURE === '1';
@@ -290,23 +292,29 @@ if (!TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN || !TWILIO_FROM_NUMBER) {
 if (!XAI_API_KEY) {
   console.warn('[warn] XAI_API_KEY missing — media-stream bridge will fail until set');
 }
-/** Dedicated media HMAC key, or the operator key when the dedicated key is unset. */
+/**
+ * HMAC key captured at startup.
+ * MEDIA_STREAM_SECRET is only a separate rotation key. Mint and verify both
+ * refuse when BRIDGE_API_KEY is unset, even if MEDIA_STREAM_SECRET is set.
+ */
 function mediaAuthSecret() {
-  const dedicated = String(process.env.MEDIA_STREAM_SECRET || '').trim();
-  if (dedicated) return dedicated;
-  return process.env.BRIDGE_API_KEY || '';
+  if (!BRIDGE_API_KEY) return '';
+  return MEDIA_STREAM_SECRET || BRIDGE_API_KEY;
 }
 
 function mediaAuthUsesDedicatedSecret() {
-  return Boolean(String(process.env.MEDIA_STREAM_SECRET || '').trim());
+  return Boolean(BRIDGE_API_KEY && MEDIA_STREAM_SECRET);
 }
 
-{
-  const dedicated = String(process.env.MEDIA_STREAM_SECRET || '').trim();
-  if (dedicated && Buffer.byteLength(dedicated, 'utf8') < 32) {
-    console.warn('[warn] MEDIA_STREAM_SECRET is shorter than 32 bytes. Use a longer random value for media HMAC.');
+function warnIfShortSecret(name, value) {
+  if (!value) return;
+  if (Buffer.byteLength(String(value), 'utf8') < 32) {
+    console.warn(`[warn] ${name} is shorter than 32 bytes. Use a longer random value.`);
   }
 }
+
+warnIfShortSecret('BRIDGE_API_KEY', BRIDGE_API_KEY);
+warnIfShortSecret('MEDIA_STREAM_SECRET', MEDIA_STREAM_SECRET);
 
 if (!BRIDGE_API_KEY && !ALLOW_UNAUTHENTICATED_OPERATOR) {
   console.error('[error] BRIDGE_API_KEY is not set and ALLOW_UNAUTHENTICATED_OPERATOR is not enabled.');
@@ -318,11 +326,7 @@ if (!BRIDGE_API_KEY && ALLOW_UNAUTHENTICATED_OPERATOR) {
   console.warn('');
   console.warn('[SECURITY WARNING] ALLOW_UNAUTHENTICATED_OPERATOR=1 is set WITHOUT BRIDGE_API_KEY!');
   console.warn('[SECURITY WARNING] Operator control-plane routes (/call, /steer, /hangup, /voice, /transcript) are UNPROTECTED.');
-  if (!mediaAuthSecret()) {
-    console.warn('[SECURITY WARNING] Media stream HMAC authentication is UNAVAILABLE — signature minting will fail and calls will break.');
-  } else {
-    console.warn('[SECURITY WARNING] Media stream HMAC is using MEDIA_STREAM_SECRET. Operator routes are still unprotected.');
-  }
+  console.warn('[SECURITY WARNING] Media stream HMAC authentication is UNAVAILABLE because BRIDGE_API_KEY is unset. Signatures are not minted or verified, even if MEDIA_STREAM_SECRET is set.');
   console.warn('[SECURITY WARNING] Anyone who can reach this host can spend your Twilio account and xAI credits.');
   console.warn('[SECURITY WARNING] This mode is ONLY for localhost demos. Use BRIDGE_API_KEY for any shared/public deployment.');
   console.warn('');
@@ -351,7 +355,7 @@ const MEDIA_AUTH_WINDOW_MS = Number(process.env.MEDIA_AUTH_WINDOW_MS || 120000);
 function generateMediaAuthSignature(callSid, timestamp) {
   const secret = mediaAuthSecret();
   if (!secret) {
-    throw new Error('MEDIA_STREAM_SECRET or BRIDGE_API_KEY required for HMAC media auth');
+    throw new Error('BRIDGE_API_KEY is required for HMAC media auth');
   }
   const message = `${callSid}:${timestamp}`;
   return crypto.createHmac('sha256', secret).update(message, 'utf8').digest('base64url');
