@@ -56,7 +56,11 @@ Returns `callSid`, `style`, `voice`, etc.
 
 ### POST /steer
 
-Body: `{ "callSid": "...", "text": "operator coaching" }` — updates instructions mid-call without announcing coaching.
+Body: `{ "callSid": "...", "text": "operator coaching", "respond": false }`
+
+Updates instructions mid-call without announcing coaching. Each request replaces the previous operator coaching: instructions are rebuilt from the call goal, context, and style, then the new text is appended. Earlier `/steer` text is not kept.
+
+`respond` is optional. Omit it or set JSON `true` to force a model response (the default). Set JSON `false` to update instructions only, with no `response.create`. Any other JSON value, including the string `"false"`, `0`, or `null`, is rejected with 400.
 
 ### POST /hangup
 
@@ -84,7 +88,7 @@ The `/media-stream` WebSocket endpoint checks an HMAC-SHA256 signature on the Tw
 
 **How it works:**
 1. When `/call` is invoked, Twilio fetches TwiML from the `/twiml-connect` endpoint
-2. The bridge generates HMAC-SHA256 signature: `HMAC(BRIDGE_API_KEY, callSid:timestamp)`
+2. The bridge generates HMAC-SHA256 signature: `HMAC(media secret, callSid:timestamp)`. Both keys are read once at startup. The media secret is `MEDIA_STREAM_SECRET` when that value is non-empty after trimming and `BRIDGE_API_KEY` is set; otherwise it is `BRIDGE_API_KEY`. Signatures are not minted or verified when `BRIDGE_API_KEY` is unset, even if `MEDIA_STREAM_SECRET` is set.
 3. The `<Stream url>` is the bare path `wss://HOST/media-stream` with no query string. Twilio error [31920](https://www.twilio.com/docs/api/errors/31920) rejects Stream URLs that include a query string.
 4. `callSid`, `timestamp`, and `signature` are `<Parameter>` values. Twilio delivers them on the start message as `start.customParameters` ([WebSocket messages](https://www.twilio.com/docs/voice/media-streams/websocket-messages)).
 5. The WebSocket upgrade accepts `/media-stream` without reading auth from the query string. Until `start` binds, the socket is unauthenticated. Messages are limited to 64 KiB. One Twilio `connected` event is ignored. Any other frame before `start` closes the socket with 1008, and a socket with no bound `start` within 5 seconds is closed with 1008. Each of those pre-bind closes is followed by `terminate` about 1 second later if the peer does not finish the close handshake, so a silent client cannot hold a waiting slot for the 30 second handshake timeout. At most 4 unbound sockets are accepted per client, and at most 32 unbound sockets at once. When that global cap is full, the oldest unbound socket is evicted instead of refusing the new one. The per-client key is `CF-Connecting-IP` only when the TCP peer is loopback (cloudflared on this host; every tunneled socket would otherwise be `127.0.0.1`). Any other peer is keyed by its remote address, and a `CF-Connecting-IP` header on those connections is ignored. IPv6 clients are keyed by the /64 prefix. When `TWILIO_AUTH_TOKEN` is set, an upgrade with a valid `X-Twilio-Signature` leaves the unsigned pool and is counted in a separate pool of 8 unbound sockets per client and 128 globally. That signature is static for the host and does not expire, so a leaked header is not an unlimited exemption. A leaked signature sent from 16 or more client addresses can fill that global pool of 128. The next signed socket then evicts the oldest unbound signed socket, which can be a Twilio stream that has not sent `start` yet. If the signature leaks, rotate `TWILIO_AUTH_TOKEN`. A full signed pool evicts the oldest unbound signed socket and does not evict unsigned sockets or a socket that has already bound. A signature header that is present but does not validate is logged at most once per second, without the header value, and that socket stays in the unsigned pool. Pre-bind warnings, `media start rejected`, and `ws error` are each logged at most once per second and do not include the client event name. Put rate limiting in front of this process as well (Cloudflare or another edge). The in-process caps are not a substitute for that.
@@ -101,20 +105,20 @@ Anyone who captures the TwiML `<Parameter>` values can open `/media-stream` and 
 
 **This mitigates:**
 - **Replay attacks:** Signatures are single-use within a process instance and time-limited (default 2 minutes)
-- **Forged signatures:** HMAC signatures cannot be forged without knowing `BRIDGE_API_KEY`
+- **Forged signatures:** HMAC signatures cannot be forged without knowing the media secret (`MEDIA_STREAM_SECRET` when `BRIDGE_API_KEY` is also set, otherwise `BRIDGE_API_KEY`)
 - **CallSid forgery:** Signature verification fails if CallSid is tampered with
 - **Parameter injection:** `start.callSid` must match the signed `callSid` parameter and the pending session. Goal, context, and voice are not taken from the start event.
 - **Unauthenticated sockets:** Oversized frames, extra waiting sockets from one client, non-start frames, and a missing `start` are closed and then terminated. A full global waiting list evicts the oldest unbound socket in that pool. A valid `X-Twilio-Signature` uses a separate pool (8 per client, 128 global) because the signature does not expire. Edge rate limiting is still required
 
 **Signature verification:**
-- HMAC-SHA256 signature over `callSid:timestamp` using `BRIDGE_API_KEY` as secret
+- HMAC-SHA256 signature over `callSid:timestamp` using `MEDIA_STREAM_SECRET` when that value is non-empty after trimming and `BRIDGE_API_KEY` is set, otherwise `BRIDGE_API_KEY`. `MEDIA_STREAM_SECRET` alone does not enable signatures.
 - Constant-time comparison prevents timing attacks
 - Timestamp must be within `MEDIA_AUTH_WINDOW_MS` (default 2 minutes)
 - Signatures are single-use (claimed when the start event is accepted; a second start with the same signature is rejected)
 - Old signatures invalidated on `/twiml-connect` retry (prevents multi-sig accumulation)
 
 **Security properties:**
-- **Strong binding:** Signature is cryptographically bound to CallSid and timestamp
+- **Call binding:** The signature covers that CallSid and timestamp. Replays in this process are rejected, and the timestamp must fall inside `MEDIA_AUTH_WINDOW_MS`
 - **Single-use per process:** Each call gets a unique signature; replays are rejected within the same process instance
 - **Time-limited:** Timestamps expire after `MEDIA_AUTH_WINDOW_MS`
 - **No bearer tokens:** Cannot be used without knowing the secret key
@@ -175,8 +179,9 @@ For public hosts, **always** use one of:
 | XAI_VOICE | Default TTS voice id (example: ara) |
 | PORT | HTTP listen port (default 3000) |
 | PUBLIC_HOST | Public hostname for media-stream WSS (no scheme) |
-| BRIDGE_API_KEY | **REQUIRED:** Shared secret for operator routes (Bearer or X-Bridge-Key) AND HMAC signing key for media stream auth. Without it, `/twiml-connect` returns 500 and calls fail. |
-| ALLOW_UNAUTHENTICATED_OPERATOR | Set to `1` to bypass auth when BRIDGE_API_KEY is unset (localhost demos only — never use for shared/public deployments). Server exits on startup if BRIDGE_API_KEY is missing and this is not set. |
+| BRIDGE_API_KEY | **REQUIRED** for operator routes (Bearer or X-Bridge-Key) unless `ALLOW_UNAUTHENTICATED_OPERATOR` is exactly `1` (the process exits otherwise). Also required for media HMAC. When `MEDIA_STREAM_SECRET` is empty, this value is the HMAC key. Read once at startup. A non-empty value shorter than 32 bytes logs a warning and is still accepted. |
+| MEDIA_STREAM_SECRET | Optional dedicated HMAC key, used only when `BRIDGE_API_KEY` is also set. When non-empty after trim, signatures use this value instead of `BRIDGE_API_KEY` so the two keys can rotate separately. If `BRIDGE_API_KEY` is unset, this value is ignored and signatures are not minted or verified. Read once at startup. A non-empty value shorter than 32 bytes logs a warning and is still accepted. |
+| ALLOW_UNAUTHENTICATED_OPERATOR | Set to `1` to bypass operator-route auth when BRIDGE_API_KEY is unset (localhost demos only — never use for shared/public deployments). Server exits on startup if BRIDGE_API_KEY is missing and this is not set. This does not enable media HMAC. |
 | MEDIA_AUTH_WINDOW_MS | HMAC signature validity window in milliseconds (default 120000 = 2 minutes) |
 | SESSION_MAX_AGE_MS | Maximum session age before GC in milliseconds (default 7200000 = 2 hours) |
 | ENABLE_RECORDING | Set to `1` to enable dual-channel call recording (default off) |
@@ -205,7 +210,7 @@ Optional softContinue true on POST /call enables post-playback soft-continue.
 
 ## Security notes
 
-- **BRIDGE_API_KEY is REQUIRED**: Without it, `/twiml-connect` returns 500 and calls fail. This key serves dual purposes: HTTP auth and HMAC signing.
+- **BRIDGE_API_KEY is REQUIRED** for operator routes unless `ALLOW_UNAUTHENTICATED_OPERATOR` is exactly `1`, and it is required for media HMAC even then. `ALLOW_UNAUTHENTICATED_OPERATOR=1` with `MEDIA_STREAM_SECRET` set still refuses to mint and verify signatures, so calls cannot complete the media handshake. The process listens on all interfaces; open operator routes are only a localhost escape hatch. When `BRIDGE_API_KEY` is set, media HMAC uses `MEDIA_STREAM_SECRET` if that value is non-empty after trim, otherwise `BRIDGE_API_KEY`. Without `BRIDGE_API_KEY`, `/twiml-connect` returns 500 because signature minting throws.
 - **Media Stream WebSocket** checks an HMAC-SHA256 signature on the `start` event. The socket is unauthenticated until that bind. A signature covers a CallSid and timestamp.
 - **X-Twilio-Signature validation**: Set `TWILIO_AUTH_TOKEN` to enable signature validation on `/twiml-connect` (prevents sessionId theft).
 - **Recording is opt-in** via `ENABLE_RECORDING=1` (default off).
@@ -216,7 +221,7 @@ Optional softContinue true on POST /call enables post-playback soft-continue.
 
 ## Deployment requirements
 
-- **BRIDGE_API_KEY must be set**: Required for HMAC signing; calls fail without it
+- **BRIDGE_API_KEY must be set for media HMAC**: `MEDIA_STREAM_SECRET` is only a separate rotation key. Calls cannot mint or verify a stream signature when `BRIDGE_API_KEY` is unset.
 - **Sticky/single-node required**: In-memory pending session state means replay protection and session tracking are process-local; load balancers must route all requests from the same call to the same server instance
 - **HTTPS/WSS required**: Twilio Media Streams require secure WebSocket connections
 - **TWILIO_AUTH_TOKEN recommended**: Enables X-Twilio-Signature validation on `/twiml-connect` to prevent sessionId theft
