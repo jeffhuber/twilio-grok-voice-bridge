@@ -1682,17 +1682,169 @@ app.post('/hangup', requireBridgeAuth, async (req, res) => {
 const MEDIA_WS_MAX_PAYLOAD = 64 * 1024;
 const MEDIA_START_TIMEOUT_MS = 5000;
 const MAX_AWAITING_MEDIA_SOCKETS = 32;
+const MAX_AWAITING_MEDIA_SOCKETS_PER_CLIENT = 4;
+const MEDIA_PREBIND_TERMINATE_MS = 1000;
 
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ noServer: true, maxPayload: MEDIA_WS_MAX_PAYLOAD });
 let awaitingMediaStarts = 0;
-let lastUnauthMediaLogAt = 0;
+const unauthMediaLog = { at: 0 };
+const mediaRejectLog = { at: 0 };
+const wsErrorLog = { at: 0 };
+const prebindKillTimers = new WeakMap();
+/** @type {UnboundMediaSocket[]} */
+const unboundMediaSockets = [];
+
+/**
+ * @typedef {object} UnboundMediaSocket
+ * @property {import('ws')} ws
+ * @property {string} clientKey
+ * @property {boolean} counted
+ * @property {boolean} bound
+ * @property {boolean} dropped
+ * @property {(code: number, reason: string) => void} drop
+ */
+
+function logAtMostOncePerSecond(bucket, emit) {
+  const now = Date.now();
+  if (now - bucket.at < 1000) return;
+  bucket.at = now;
+  emit();
+}
 
 function noteUnauthMediaClose() {
-  const now = Date.now();
-  if (now - lastUnauthMediaLogAt < 1000) return;
-  lastUnauthMediaLogAt = now;
-  console.warn('[twilio] closed media socket before a bound start');
+  logAtMostOncePerSecond(unauthMediaLog, () => {
+    console.warn('[twilio] closed media socket before a bound start');
+  });
+}
+
+function noteMediaStartRejected(error) {
+  logAtMostOncePerSecond(mediaRejectLog, () => {
+    console.error(`[twilio] media start rejected: ${error}`);
+  });
+}
+
+function noteWsError(err) {
+  logAtMostOncePerSecond(wsErrorLog, () => {
+    console.error('[twilio] ws error:', err && err.message);
+  });
+}
+
+function normalizeIp(addr) {
+  if (!addr) return '';
+  const text = String(addr);
+  return text.startsWith('::ffff:') ? text.slice('::ffff:'.length) : text;
+}
+
+function isTrustedTunnelPeer(addr) {
+  const ip = normalizeIp(addr);
+  return ip === '127.0.0.1' || ip === '::1';
+}
+
+function firstHeader(value) {
+  if (Array.isArray(value)) return value[0];
+  return value;
+}
+
+/**
+ * Per-client key for unbound media sockets.
+ * CF-Connecting-IP is used only when the TCP peer is loopback, which is the
+ * local cloudflared process. Behind that tunnel every socket is 127.0.0.1.
+ * Any other peer is keyed by remote address so a client cannot spoof the header.
+ * @param {import('http').IncomingMessage} req
+ */
+function mediaClientKey(req) {
+  const remote = normalizeIp(req && req.socket && req.socket.remoteAddress);
+  if (isTrustedTunnelPeer(remote)) {
+    const raw = firstHeader(req && req.headers && req.headers['cf-connecting-ip']);
+    if (typeof raw === 'string') {
+      const cf = raw.split(',')[0].trim();
+      if (cf && cf.length <= 64 && !/\s/.test(cf)) return `cf:${cf}`;
+    }
+  }
+  return `ip:${remote || 'unknown'}`;
+}
+
+/**
+ * A valid X-Twilio-Signature on the upgrade does not count toward the pre-start caps.
+ * Twilio signs the public wss or https URL. No token means nothing is exempt.
+ * @param {import('http').IncomingMessage} req
+ */
+function mediaUpgradeIsTwilioSigned(req) {
+  if (!TWILIO_AUTH_TOKEN || !req || !req.headers) return false;
+  const signature = firstHeader(req.headers['x-twilio-signature']);
+  if (typeof signature !== 'string' || signature.length === 0) return false;
+  const pathOnly = String(req.url || '/media-stream').split('?')[0] || '/media-stream';
+  const hosts = [];
+  if (PUBLIC_HOST) hosts.push(PUBLIC_HOST);
+  const hostHeader = firstHeader(req.headers.host);
+  if (typeof hostHeader === 'string' && hostHeader && hosts.indexOf(hostHeader) === -1) {
+    hosts.push(hostHeader);
+  }
+  for (let i = 0; i < hosts.length; i += 1) {
+    const host = hosts[i];
+    const urls = [`wss://${host}${pathOnly}`, `https://${host}${pathOnly}`];
+    for (let j = 0; j < urls.length; j += 1) {
+      try {
+        if (twilio.validateRequest(TWILIO_AUTH_TOKEN, signature, urls[j], {})) return true;
+      } catch {
+        /* malformed URL */
+      }
+    }
+  }
+  return false;
+}
+
+function forgetUnbound(entry) {
+  const idx = unboundMediaSockets.indexOf(entry);
+  if (idx >= 0) unboundMediaSockets.splice(idx, 1);
+}
+
+function unboundCountFor(clientKey) {
+  let count = 0;
+  for (let i = 0; i < unboundMediaSockets.length; i += 1) {
+    if (unboundMediaSockets[i].counted && unboundMediaSockets[i].clientKey === clientKey) count += 1;
+  }
+  return count;
+}
+
+function evictOldestUnbound() {
+  for (let i = 0; i < unboundMediaSockets.length; i += 1) {
+    const entry = unboundMediaSockets[i];
+    if (entry.counted && !entry.bound && !entry.dropped) {
+      entry.drop(1008, 'evicted');
+      return;
+    }
+  }
+}
+
+function armPrebindTerminate(ws) {
+  if (prebindKillTimers.has(ws)) return;
+  const timer = setTimeout(() => {
+    prebindKillTimers.delete(ws);
+    try {
+      ws.terminate();
+    } catch {
+      /* already gone */
+    }
+  }, MEDIA_PREBIND_TERMINATE_MS);
+  if (typeof timer.unref === 'function') timer.unref();
+  prebindKillTimers.set(ws, timer);
+  ws.once('close', () => {
+    const pending = prebindKillTimers.get(ws);
+    if (pending) clearTimeout(pending);
+    prebindKillTimers.delete(ws);
+  });
+}
+
+function rejectPrebindSocket(ws, code, reason) {
+  noteUnauthMediaClose();
+  try {
+    ws.close(code, reason);
+  } catch {
+    /* already closing */
+  }
+  armPrebindTerminate(ws);
 }
 
 server.on('upgrade', (req, socket, head) => {
@@ -1707,70 +1859,97 @@ server.on('upgrade', (req, socket, head) => {
   }
 });
 
-wss.on('connection', (ws) => {
+wss.on('connection', (ws, req) => {
   // The upgrade is unauthenticated. Twilio sends one "connected" event, then "start".
-  if (awaitingMediaStarts >= MAX_AWAITING_MEDIA_SOCKETS) {
-    ws.close(1008, 'too many pending streams');
+  const clientKey = mediaClientKey(req);
+  const exempt = mediaUpgradeIsTwilioSigned(req);
+  /** @type {UnboundMediaSocket|null} */
+  let entry = null;
+
+  ws.on('error', (err) => {
+    noteWsError(err);
+    if (!entry || !entry.bound) armPrebindTerminate(ws);
+  });
+
+  if (!exempt && unboundCountFor(clientKey) >= MAX_AWAITING_MEDIA_SOCKETS_PER_CLIENT) {
+    rejectPrebindSocket(ws, 1008, 'too many pending streams');
     return;
   }
-  awaitingMediaStarts += 1;
+  if (!exempt && awaitingMediaStarts >= MAX_AWAITING_MEDIA_SOCKETS) {
+    evictOldestUnbound();
+  }
 
   /** @type {CallSession|null} */
   let session = null;
   let signature = '';
-  let boundToCallSid = false;
   let sawConnected = false;
-  let released = false;
+
+  entry = {
+    ws,
+    clientKey,
+    counted: false,
+    bound: false,
+    dropped: false,
+    drop() {},
+  };
 
   const releaseAwaiting = () => {
-    if (released) return;
-    released = true;
+    if (!entry.counted) return;
+    entry.counted = false;
     awaitingMediaStarts -= 1;
   };
 
   const startTimer = setTimeout(() => {
-    if (!boundToCallSid) {
-      noteUnauthMediaClose();
-      ws.close(1008, 'start timeout');
-    }
+    entry.drop(1008, 'start timeout');
   }, MEDIA_START_TIMEOUT_MS);
+  if (typeof startTimer.unref === 'function') startTimer.unref();
 
-  const closeBeforeStart = () => {
+  entry.drop = (code, reason) => {
+    if (entry.dropped || entry.bound) return;
+    entry.dropped = true;
     clearTimeout(startTimer);
-    noteUnauthMediaClose();
-    ws.close(1008, 'start required');
+    forgetUnbound(entry);
+    releaseAwaiting();
+    rejectPrebindSocket(ws, code, reason);
   };
 
+  if (!exempt) {
+    entry.counted = true;
+    awaitingMediaStarts += 1;
+  }
+  unboundMediaSockets.push(entry);
+
   ws.on('message', (data) => {
-    if (boundToCallSid) {
+    if (entry.bound) {
       handleTwilioMessage(session, data);
       return;
     }
+    if (entry.dropped) return;
 
     let msg;
     try {
       if (!data || (typeof data !== 'string' && !Buffer.isBuffer(data))) {
-        closeBeforeStart();
+        entry.drop(1008, 'start required');
         return;
       }
       const text = data.toString();
       if (!text || text.trim() === '') {
-        closeBeforeStart();
+        entry.drop(1008, 'start required');
         return;
       }
       msg = JSON.parse(text);
     } catch {
-      closeBeforeStart();
+      entry.drop(1008, 'start required');
       return;
     }
     if (!msg || typeof msg !== 'object' || Array.isArray(msg)) {
-      closeBeforeStart();
+      entry.drop(1008, 'start required');
       return;
     }
 
     if (msg.event === 'connected') {
       if (sawConnected) {
-        closeBeforeStart();
+        entry.drop(1008, 'start required');
         return;
       }
       sawConnected = true;
@@ -1778,23 +1957,23 @@ wss.on('connection', (ws) => {
     }
 
     if (msg.event !== 'start') {
-      closeBeforeStart();
+      entry.drop(1008, 'start required');
       return;
     }
 
     const result = applyMediaStart(ws, msg);
     if (!result.ok) {
-      console.error(`[twilio] media start rejected: ${result.error}`);
-      clearTimeout(startTimer);
-      ws.close(1008, 'media auth failed');
+      noteMediaStartRejected(result.error);
+      entry.drop(1008, 'media auth failed');
       return;
     }
 
     // Goal, context, and voice stay as the operator set them at /call.
     session = result.session;
     signature = result.signature;
-    boundToCallSid = true;
+    entry.bound = true;
     clearTimeout(startTimer);
+    forgetUnbound(entry);
     releaseAwaiting();
     pendingByCallSid.delete(session.callSid);
     claimedTokens.delete(signature);
@@ -1805,6 +1984,7 @@ wss.on('connection', (ws) => {
 
   ws.on('close', () => {
     clearTimeout(startTimer);
+    forgetUnbound(entry);
     releaseAwaiting();
     if (!session) return;
     console.log('[twilio] media-stream closed');
@@ -1817,10 +1997,6 @@ wss.on('connection', (ws) => {
       }
       session.grokWs = null;
     }
-  });
-
-  ws.on('error', (err) => {
-    console.error('[twilio] ws error:', err.message);
   });
 });
 
@@ -1844,4 +2020,8 @@ module.exports = {
   MEDIA_WS_MAX_PAYLOAD,
   MEDIA_START_TIMEOUT_MS,
   MAX_AWAITING_MEDIA_SOCKETS,
+  MAX_AWAITING_MEDIA_SOCKETS_PER_CLIENT,
+  MEDIA_PREBIND_TERMINATE_MS,
+  mediaClientKey,
+  noteUnauthMediaClose,
 };

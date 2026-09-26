@@ -30,7 +30,7 @@ All control-plane routes (`/call`, `/steer`, `/hangup`, `/voice`, `/transcript`)
 **Single-use claim:**
 - Signatures can only be claimed once; a second start with the same signature is rejected and the socket is closed
 - CallSid binding: `start.callSid` must match the signed parameter; mismatches close the WebSocket
-- The socket is unauthenticated until `start`. Frames are capped at 64 KiB, waiting sockets are capped, a non-start frame other than one `connected` event closes the socket, and a missing `start` closes it after 5 seconds. A consumed signature is not put back
+- The socket is unauthenticated until `start`. Frames are capped at 64 KiB. One client may hold at most 4 unbound sockets, and the process at most 32. A full global list evicts the oldest unbound socket. The per-client key is `CF-Connecting-IP` only for a loopback peer (the local tunnel); otherwise it is the remote address. A valid `X-Twilio-Signature` is exempt from those caps when `TWILIO_AUTH_TOKEN` is set. A non-start frame other than one `connected` event closes the socket, and a missing `start` closes it after 5 seconds. Pre-bind closes terminate after about 1 second if the handshake is not finished. A consumed signature is not put back. Rate limit this path at the edge as well
 
 ### 3. Session Lifecycle Management
 
@@ -116,7 +116,7 @@ Use `.env` (gitignored) or secret management systems for deployments.
   - Short TTL (default 2 minutes)
   - Signature tied to specific CallSid (cannot transfer to other calls)
   - Upgrade does not read auth from the query string
-  - Waiting sockets, frame size, and the time before `start` are capped so an unbound socket cannot sit open or push a large frame
+  - Waiting sockets are capped per client and globally. A full global list evicts the oldest unbound socket, and a pre-bind close terminates if the peer does not answer the handshake. Frame size and the time before `start` are capped. Rate limit `/media-stream` at the edge; these caps are not a substitute
 
 *Scenario 2: `/twiml-connect` sessionId leak*
 - If `sessionId` query parameter is leaked before Twilio fetches TwiML
@@ -176,7 +176,7 @@ The HMAC-based authentication provides:
 ## Known Limitations
 
 - This bridge is a proof-of-concept; it is not production-hardened out of the box
-- Rate limiting is not implemented; add rate limiting at the reverse proxy level
+- In-process media caps do not replace edge rate limiting. Limit new connections to `/media-stream` at Cloudflare or another reverse proxy
 - DDoS protection should be handled by your edge (Cloudflare, AWS Shield, etc.)
 - No intrusion detection; monitor logs for anomalies
 - `BRIDGE_API_KEY` serves dual purposes (HTTP auth + HMAC signing); consider separate keys for defense in depth

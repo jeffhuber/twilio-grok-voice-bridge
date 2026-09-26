@@ -3,10 +3,14 @@
 
 process.env.BRIDGE_API_KEY = process.env.BRIDGE_API_KEY || 'operator-test-key';
 process.env.PUBLIC_HOST = process.env.PUBLIC_HOST || 'bridge.example.com';
+process.env.TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN || 'twilio-test-token';
 delete process.env.XAI_API_KEY;
 
+const crypto = require('crypto');
 const fs = require('fs');
+const net = require('net');
 const path = require('path');
+const twilio = require('twilio');
 const WebSocket = require('ws');
 const {
   buildConnectTwiml,
@@ -18,6 +22,10 @@ const {
   MEDIA_WS_MAX_PAYLOAD,
   MEDIA_START_TIMEOUT_MS,
   MAX_AWAITING_MEDIA_SOCKETS,
+  MAX_AWAITING_MEDIA_SOCKETS_PER_CLIENT,
+  MEDIA_PREBIND_TERMINATE_MS,
+  mediaClientKey,
+  noteUnauthMediaClose,
 } = require('../src/server.js');
 
 let failed = 0;
@@ -53,11 +61,104 @@ function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function connect(port) {
+function connect(port, headers) {
   return new Promise((resolve, reject) => {
-    const ws = new WebSocket(`ws://127.0.0.1:${port}/media-stream`);
-    ws.on('open', () => resolve(ws));
-    ws.on('error', reject);
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/media-stream`, headers ? { headers } : undefined);
+    let opened = false;
+    const timer = setTimeout(() => {
+      try {
+        ws.terminate();
+      } catch {
+        /* ignore */
+      }
+      reject(new Error('open timed out'));
+    }, 2000);
+    ws.on('open', () => {
+      opened = true;
+      clearTimeout(timer);
+      resolve(ws);
+    });
+    ws.on('error', (err) => {
+      if (opened) return;
+      clearTimeout(timer);
+      reject(err);
+    });
+  });
+}
+
+function connectExpectClose(port, headers, ms) {
+  return new Promise((resolve) => {
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/media-stream`, headers ? { headers } : undefined);
+    const timer = setTimeout(() => {
+      try {
+        ws.terminate();
+      } catch {
+        /* ignore */
+      }
+      resolve({ code: null, timedOut: true });
+    }, ms);
+    ws.on('error', () => {});
+    ws.on('close', (code) => {
+      clearTimeout(timer);
+      resolve({ code, timedOut: false });
+    });
+  });
+}
+
+function wsTextFrame(text) {
+  const payload = Buffer.from(text);
+  const mask = crypto.randomBytes(4);
+  const masked = Buffer.alloc(payload.length);
+  for (let i = 0; i < payload.length; i += 1) masked[i] = payload[i] ^ mask[i % 4];
+  return Buffer.concat([Buffer.from([0x81, 0x80 | payload.length]), mask, masked]);
+}
+
+function rawUpgrade(port, headers) {
+  return new Promise((resolve, reject) => {
+    const key = crypto.randomBytes(16).toString('base64');
+    const socket = net.connect(port, '127.0.0.1');
+    const timer = setTimeout(() => {
+      socket.destroy();
+      reject(new Error('raw upgrade timed out'));
+    }, 2000);
+    socket.on('error', (err) => {
+      clearTimeout(timer);
+      reject(err);
+    });
+    socket.on('connect', () => {
+      let req = `GET /media-stream HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: ${key}\r\nSec-WebSocket-Version: 13\r\n`;
+      if (headers) {
+        for (const name of Object.keys(headers)) req += `${name}: ${headers[name]}\r\n`;
+      }
+      req += '\r\n';
+      socket.write(req);
+    });
+    let buf = Buffer.alloc(0);
+    let handshake = false;
+    socket.on('data', (chunk) => {
+      if (handshake) return;
+      buf = Buffer.concat([buf, chunk]);
+      if (!buf.includes('\r\n\r\n')) return;
+      handshake = true;
+      clearTimeout(timer);
+      resolve(socket);
+    });
+  });
+}
+
+function waitSocketDead(socket, ms) {
+  return new Promise((resolve) => {
+    if (socket.destroyed) {
+      resolve({ dead: true, timedOut: false });
+      return;
+    }
+    const timer = setTimeout(() => resolve({ dead: false, timedOut: true }), ms);
+    const done = () => {
+      clearTimeout(timer);
+      resolve({ dead: true, timedOut: false });
+    };
+    socket.once('close', done);
+    socket.once('error', done);
   });
 }
 
@@ -118,6 +219,31 @@ async function main() {
     pass('media-stream connection handler does not read query params');
   } else {
     fail('connection handler still reads query params');
+  }
+
+  const spoofed = mediaClientKey({
+    socket: { remoteAddress: '203.0.113.8' },
+    headers: { 'cf-connecting-ip': '198.51.100.9' },
+  });
+  if (spoofed === 'ip:203.0.113.8') {
+    pass('CF-Connecting-IP is ignored unless the peer is loopback');
+  } else {
+    fail(`untrusted client key was ${spoofed}`);
+  }
+  const tunneled = mediaClientKey({
+    socket: { remoteAddress: '::ffff:127.0.0.1' },
+    headers: { 'cf-connecting-ip': '198.51.100.9' },
+  });
+  if (tunneled === 'cf:198.51.100.9') {
+    pass('a loopback peer uses CF-Connecting-IP');
+  } else {
+    fail(`tunnel client key was ${tunneled}`);
+  }
+  const plainLoop = mediaClientKey({ socket: { remoteAddress: '127.0.0.1' }, headers: {} });
+  if (plainLoop === 'ip:127.0.0.1') {
+    pass('loopback without CF-Connecting-IP uses the remote address');
+  } else {
+    fail(`plain loopback key was ${plainLoop}`);
   }
 
   const xml = buildConnectTwiml({
@@ -196,6 +322,7 @@ async function main() {
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   const { port } = server.address();
   const logs = captureConsole();
+  const held = [];
 
   try {
     const marker = 'prestart-marker-not-a-twilio-event';
@@ -292,28 +419,185 @@ async function main() {
       fail(`oversized frame close code=${hugeCode}`);
     }
 
-    const openSockets = [];
+    const eviction = [];
     for (let i = 0; i < MAX_AWAITING_MEDIA_SOCKETS; i += 1) {
-      openSockets.push(await connect(port));
+      const sock = await connect(port, { 'CF-Connecting-IP': `203.0.113.${i + 1}` });
+      eviction.push(sock);
+      held.push(sock);
     }
-    const overflowCode = await new Promise((resolve, reject) => {
-      const ws = new WebSocket(`ws://127.0.0.1:${port}/media-stream`);
-      const timer = setTimeout(() => reject(new Error('cap close timed out')), 2000);
-      ws.on('error', () => {});
-      ws.on('close', (code) => {
-        clearTimeout(timer);
-        resolve(code);
-      });
-    });
-    if (overflowCode === 1008 && openSockets.every((sock) => sock.readyState === WebSocket.OPEN)) {
-      pass('awaiting-start sockets are capped');
+    let oldestCode = null;
+    let oldestTimedOut = false;
+    const oldestWait = waitClose(eviction[0], 2000).then(
+      (code) => {
+        oldestCode = code;
+      },
+      () => {
+        oldestTimedOut = true;
+      }
+    );
+    const newest = await connect(port, { 'CF-Connecting-IP': '203.0.113.200' });
+    held.push(newest);
+    await oldestWait;
+    if (!oldestTimedOut && oldestCode === 1008 && newest.readyState === WebSocket.OPEN) {
+      pass('a full global cap evicts the oldest unbound socket');
     } else {
-      fail(`cap close code=${overflowCode}`);
+      fail(`eviction code=${oldestCode} timedOut=${oldestTimedOut} newest=${newest.readyState}`);
     }
-    for (const sock of openSockets) sock.close();
+    for (const sock of eviction) {
+      try {
+        sock.close();
+      } catch {
+        /* ignore */
+      }
+    }
+    newest.close();
+
+    const clientIp = '198.51.100.10';
+    const sameClient = [];
+    for (let i = 0; i < MAX_AWAITING_MEDIA_SOCKETS_PER_CLIENT; i += 1) {
+      const sock = await connect(port, { 'CF-Connecting-IP': clientIp });
+      sameClient.push(sock);
+      held.push(sock);
+    }
+    const blocked = await connectExpectClose(port, { 'CF-Connecting-IP': clientIp }, 2000);
+    if (!blocked.timedOut && blocked.code === 1008 && sameClient.every((sock) => sock.readyState === WebSocket.OPEN)) {
+      pass('one client cannot hold more than the per-client unbound cap');
+    } else {
+      fail(`per-client cap result ${JSON.stringify(blocked)}`);
+    }
+
+    const signedUrl = `wss://${process.env.PUBLIC_HOST}/media-stream`;
+    const twilioSignature = twilio.getExpectedTwilioSignature(process.env.TWILIO_AUTH_TOKEN, signedUrl, {});
+    const signed = await connect(port, {
+      'CF-Connecting-IP': clientIp,
+      'X-Twilio-Signature': twilioSignature,
+    });
+    held.push(signed);
+    if (signed.readyState === WebSocket.OPEN) {
+      pass('a valid X-Twilio-Signature does not count toward the per-client cap');
+    } else {
+      fail('signed upgrade was capped');
+    }
+    const bogus = await connectExpectClose(
+      port,
+      { 'CF-Connecting-IP': clientIp, 'X-Twilio-Signature': 'not-a-signature' },
+      2000
+    );
+    if (!bogus.timedOut && bogus.code === 1008) {
+      pass('an invalid X-Twilio-Signature still counts toward the per-client cap');
+    } else {
+      fail(`invalid signature cap result ${JSON.stringify(bogus)}`);
+    }
+    for (const sock of sameClient) sock.close();
+    signed.close();
+
+    const rawIp = '198.51.100.40';
+    const rawStarted = Date.now();
+    const raws = [];
+    for (let i = 0; i < MAX_AWAITING_MEDIA_SOCKETS_PER_CLIENT; i += 1) {
+      const raw = await rawUpgrade(port, { 'CF-Connecting-IP': rawIp });
+      raws.push(raw);
+      held.push(raw);
+      raw.write(wsTextFrame(JSON.stringify({ event: 'not-a-start' })));
+    }
+    const deaths = await Promise.all(
+      raws.map((raw) => waitSocketDead(raw, MEDIA_PREBIND_TERMINATE_MS + 1500))
+    );
+    const rawElapsed = Date.now() - rawStarted;
+    if (deaths.every((item) => item.dead && !item.timedOut) && rawElapsed < 4000) {
+      pass('a client that ignores the close handshake is terminated');
+    } else {
+      fail(`silent close handshake held the socket elapsed=${rawElapsed}`);
+    }
+    let resumed = null;
+    try {
+      resumed = await connect(port, { 'CF-Connecting-IP': rawIp });
+      held.push(resumed);
+      await delay(300);
+    } catch (err) {
+      fail(`slot still held after a silent close: ${err.message}`);
+    }
+    if (resumed && resumed.readyState === WebSocket.OPEN) {
+      pass('the same client can connect again once terminate frees the cap');
+    } else if (resumed) {
+      fail('the follow-up socket was closed; the per-client slot was still held');
+    }
+    if (resumed) resumed.close();
+
+    await delay(1100);
+    const countLines = (needle) => logs.lines.filter((line) => line.includes(needle)).length;
+    const warnsBeforeDirect = countLines('closed media socket before a bound start');
+    noteUnauthMediaClose();
+    noteUnauthMediaClose();
+    noteUnauthMediaClose();
+    const directWarns = countLines('closed media socket before a bound start') - warnsBeforeDirect;
+    if (directWarns === 1) {
+      pass('noteUnauthMediaClose emits one warning per second');
+    } else {
+      fail(`noteUnauthMediaClose emitted ${directWarns} warnings`);
+    }
+
+    await delay(1100);
+    const warnsAtBurst = countLines('closed media socket before a bound start');
+    const rejectsAtBurst = countLines('[twilio] media start rejected:');
+    const wsErrAtBurst = countLines('[twilio] ws error:');
+    const burst = [];
+    for (let i = 0; i < 5; i += 1) {
+      const sock = await connect(port, { 'CF-Connecting-IP': `198.51.100.${50 + i}` });
+      burst.push(sock);
+      held.push(sock);
+    }
+    for (const sock of burst) {
+      sock.send(JSON.stringify({ event: 'prestart-marker-not-a-twilio-event' }));
+    }
+
+    const rejectSession = createSession({ callSid: 'call-log-limit', goal: 'Say hello' });
+    const rejectMint = mintMediaAuth(rejectSession, 'call-log-limit');
+    const badSig = rejectMint.signature.slice(0, -1) + (rejectMint.signature.endsWith('a') ? 'b' : 'a');
+    for (let i = 0; i < 2; i += 1) {
+      const sock = await connect(port, { 'CF-Connecting-IP': `198.51.100.${80 + i}` });
+      held.push(sock);
+      sock.send(JSON.stringify(startMessage('call-log-limit', rejectMint.timestamp, badSig)));
+    }
+    for (let i = 0; i < 3; i += 1) {
+      const sock = await connect(port, { 'CF-Connecting-IP': `198.51.100.${90 + i}` });
+      held.push(sock);
+      sock.send(Buffer.alloc(MEDIA_WS_MAX_PAYLOAD + 64, 0x61));
+    }
+    await delay(300);
+    const newWarns = countLines('closed media socket before a bound start') - warnsAtBurst;
+    const newRejects = countLines('[twilio] media start rejected:') - rejectsAtBurst;
+    const newWsErr = countLines('[twilio] ws error:') - wsErrAtBurst;
+    const burstLines = logs.lines.slice(logs.lines.length - 30);
+    if (newWarns === 1 && !burstLines.some((line) => line.includes('prestart-marker-not-a-twilio-event'))) {
+      pass('handler pre-bind closes go through noteUnauthMediaClose once per second');
+    } else {
+      fail(`pre-bind warning count ${newWarns}`);
+    }
+    if (newRejects === 1) {
+      pass('media start rejected is logged at most once per second');
+    } else {
+      fail(`media start rejected count ${newRejects}`);
+    }
+    if (newWsErr === 1) {
+      pass('ws error is logged at most once per second');
+    } else {
+      fail(`ws error count ${newWsErr}`);
+    }
   } finally {
+    for (const sock of held) {
+      try {
+        if (typeof sock.terminate === 'function') sock.terminate();
+        else sock.destroy();
+      } catch {
+        /* ignore */
+      }
+    }
     logs.restore();
-    await new Promise((resolve) => server.close(resolve));
+    await Promise.race([
+      new Promise((resolve) => server.close(resolve)),
+      delay(1000),
+    ]);
   }
 
   if (failed > 0) {
