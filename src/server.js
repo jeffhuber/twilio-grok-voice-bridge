@@ -21,6 +21,8 @@ const TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN;
 const TWILIO_FROM_NUMBER = process.env.TWILIO_FROM_NUMBER;
 const XAI_API_KEY = process.env.XAI_API_KEY;
 const BRIDGE_API_KEY = process.env.BRIDGE_API_KEY;
+/** Trimmed once at startup. Later process.env changes do not affect HMAC. */
+const MEDIA_STREAM_SECRET = String(process.env.MEDIA_STREAM_SECRET || '').trim();
 const ALLOW_UNAUTHENTICATED_OPERATOR = process.env.ALLOW_UNAUTHENTICATED_OPERATOR === '1';
 const ENABLE_RECORDING = process.env.ENABLE_RECORDING === '1';
 const SKIP_AI_DISCLOSURE = process.env.SKIP_AI_DISCLOSURE === '1';
@@ -290,6 +292,30 @@ if (!TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN || !TWILIO_FROM_NUMBER) {
 if (!XAI_API_KEY) {
   console.warn('[warn] XAI_API_KEY missing — media-stream bridge will fail until set');
 }
+/**
+ * HMAC key captured at startup.
+ * MEDIA_STREAM_SECRET is only a separate rotation key. Mint and verify both
+ * refuse when BRIDGE_API_KEY is unset, even if MEDIA_STREAM_SECRET is set.
+ */
+function mediaAuthSecret() {
+  if (!BRIDGE_API_KEY) return '';
+  return MEDIA_STREAM_SECRET || BRIDGE_API_KEY;
+}
+
+function mediaAuthUsesDedicatedSecret() {
+  return Boolean(BRIDGE_API_KEY && MEDIA_STREAM_SECRET);
+}
+
+function warnIfShortSecret(name, value) {
+  if (!value) return;
+  if (Buffer.byteLength(String(value), 'utf8') < 32) {
+    console.warn(`[warn] ${name} is shorter than 32 bytes. Use a longer random value.`);
+  }
+}
+
+warnIfShortSecret('BRIDGE_API_KEY', BRIDGE_API_KEY);
+warnIfShortSecret('MEDIA_STREAM_SECRET', MEDIA_STREAM_SECRET);
+
 if (!BRIDGE_API_KEY && !ALLOW_UNAUTHENTICATED_OPERATOR) {
   console.error('[error] BRIDGE_API_KEY is not set and ALLOW_UNAUTHENTICATED_OPERATOR is not enabled.');
   console.error('[error] For shared/public deployments, BRIDGE_API_KEY is required to protect operator routes.');
@@ -300,7 +326,7 @@ if (!BRIDGE_API_KEY && ALLOW_UNAUTHENTICATED_OPERATOR) {
   console.warn('');
   console.warn('[SECURITY WARNING] ALLOW_UNAUTHENTICATED_OPERATOR=1 is set WITHOUT BRIDGE_API_KEY!');
   console.warn('[SECURITY WARNING] Operator control-plane routes (/call, /steer, /hangup, /voice, /transcript) are UNPROTECTED.');
-  console.warn('[SECURITY WARNING] Media stream HMAC authentication is UNAVAILABLE — signature minting will fail and calls will break.');
+  console.warn('[SECURITY WARNING] Media stream HMAC authentication is UNAVAILABLE because BRIDGE_API_KEY is unset. Signatures are not minted or verified, even if MEDIA_STREAM_SECRET is set.');
   console.warn('[SECURITY WARNING] Anyone who can reach this host can spend your Twilio account and xAI credits.');
   console.warn('[SECURITY WARNING] This mode is ONLY for localhost demos. Use BRIDGE_API_KEY for any shared/public deployment.');
   console.warn('');
@@ -327,13 +353,12 @@ const MEDIA_AUTH_WINDOW_MS = Number(process.env.MEDIA_AUTH_WINDOW_MS || 120000);
  * Signature is HMAC-SHA256(secret, callSid:timestamp)
  */
 function generateMediaAuthSignature(callSid, timestamp) {
-  if (!BRIDGE_API_KEY) {
-    throw new Error('BRIDGE_API_KEY required for HMAC media auth');
+  const secret = mediaAuthSecret();
+  if (!secret) {
+    throw new Error('BRIDGE_API_KEY is required for HMAC media auth');
   }
   const message = `${callSid}:${timestamp}`;
-  const hmac = crypto.createHmac('sha256', BRIDGE_API_KEY);
-  hmac.update(message);
-  return hmac.digest('base64url');
+  return crypto.createHmac('sha256', secret).update(message, 'utf8').digest('base64url');
 }
 
 /**
@@ -341,8 +366,8 @@ function generateMediaAuthSignature(callSid, timestamp) {
  * Returns { valid: boolean, error?: string }
  */
 function verifyMediaAuthSignature(callSid, timestamp, signature) {
-  if (!BRIDGE_API_KEY) {
-    return { valid: false, error: 'BRIDGE_API_KEY not configured' };
+  if (!mediaAuthSecret()) {
+    return { valid: false, error: 'media auth secret not configured' };
   }
   
   const now = Date.now();
@@ -1360,7 +1385,8 @@ app.get('/health', (_req, res) => {
     styles: Object.keys(STYLE_PROFILES),
     contactConfigured: Boolean(getContact().fullName || getContact().mobile),
     authRequired: Boolean(BRIDGE_API_KEY),
-    hmacAuth: true,
+    hmacAuth: Boolean(mediaAuthSecret()),
+    mediaAuthDedicated: mediaAuthUsesDedicatedSecret(),
   });
 });
 
@@ -1899,4 +1925,13 @@ if (require.main === module) {
   });
 }
 
-module.exports = { app, validateSteerRespond, applyOperatorSteer, createSession, stripDeliveryTags };
+module.exports = {
+  app,
+  validateSteerRespond,
+  applyOperatorSteer,
+  createSession,
+  generateMediaAuthSignature,
+  verifyMediaAuthSignature,
+  mediaAuthSecret,
+  stripDeliveryTags,
+};
