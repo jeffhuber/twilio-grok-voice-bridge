@@ -59,7 +59,11 @@ Returns `callSid`, `style`, `voice`, etc.
 
 ### POST /steer
 
-Body: `{ "callSid": "...", "text": "operator coaching" }` — updates instructions mid-call without announcing coaching.
+Body: `{ "callSid": "...", "text": "operator coaching", "respond": false }`
+
+Updates instructions mid-call without announcing coaching. Each request replaces the previous operator coaching: instructions are rebuilt from the call goal, context, and style, then the new text is appended. Earlier `/steer` text is not kept.
+
+`respond` is optional. Omit it or set JSON `true` to force a model response (the default). Set JSON `false` to update instructions only, with no `response.create`. Any other JSON value, including the string `"false"`, `0`, or `null`, is rejected with 400.
 
 ### POST /hangup
 
@@ -117,7 +121,7 @@ Anyone who captures the TwiML `<Parameter>` values can open `/media-stream` and 
 - Old signatures invalidated on `/twiml-connect` retry (prevents multi-sig accumulation)
 
 **Security properties:**
-- **Strong binding:** Signature is cryptographically bound to CallSid and timestamp
+- **Call binding:** The signature covers that CallSid and timestamp. Replays in this process are rejected, and the timestamp must fall inside `MEDIA_AUTH_WINDOW_MS`
 - **Single-use per process:** Each call gets a unique signature; replays are rejected within the same process instance
 - **Time-limited:** Timestamps expire after `MEDIA_AUTH_WINDOW_MS`
 - **No bearer tokens:** Cannot be used without knowing the secret key
