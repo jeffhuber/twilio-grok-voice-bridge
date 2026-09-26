@@ -7,6 +7,11 @@ TMP="$(mktemp -d)"
 sleep_pid=""
 health_pid=""
 sup_pid=""
+tail_parent=""
+tail_child=""
+tunnel_sleeper=""
+tunnel_sup_sleeper=""
+created_env=0
 
 cleanup() {
   if [[ -n "${sup_pid}" ]]; then
@@ -21,6 +26,24 @@ cleanup() {
     kill "${sleep_pid}" 2>/dev/null || true
     wait "${sleep_pid}" 2>/dev/null || true
   fi
+  if [[ -n "${tail_child}" ]]; then
+    kill "${tail_child}" 2>/dev/null || true
+  fi
+  if [[ -n "${tail_parent}" ]]; then
+    kill "${tail_parent}" 2>/dev/null || true
+    wait "${tail_parent}" 2>/dev/null || true
+  fi
+  if [[ -n "${tunnel_sleeper}" ]]; then
+    kill "${tunnel_sleeper}" 2>/dev/null || true
+    wait "${tunnel_sleeper}" 2>/dev/null || true
+  fi
+  if [[ -n "${tunnel_sup_sleeper}" ]]; then
+    kill "${tunnel_sup_sleeper}" 2>/dev/null || true
+    wait "${tunnel_sup_sleeper}" 2>/dev/null || true
+  fi
+  if [[ "${created_env}" == "1" ]]; then
+    rm -f "${ROOT}/.env"
+  fi
   rm -rf "${TMP}"
 }
 trap cleanup EXIT
@@ -28,9 +51,12 @@ trap cleanup EXIT
 export TWILIO_BRIDGE_RUN_DIR="${TMP}/run"
 export TWILIO_BRIDGE_LOG_DIR="${TMP}/log"
 export BRIDGE_HOME="${TMP}/home"
-export BRIDGE_ENV_FILE="${TMP}/bridge.env"
+unset BRIDGE_ENV_FILE
 mkdir -p "${BRIDGE_HOME}" "${TMP}/linkdir" "${TMP}/log"
-printf 'PORT=3000\n' > "${BRIDGE_ENV_FILE}"
+if [[ ! -f "${ROOT}/.env" ]]; then
+  printf 'PORT=3000\n' > "${ROOT}/.env"
+  created_env=1
+fi
 
 fail() {
   echo "FAIL $*"
@@ -72,7 +98,7 @@ fi
 if declare -F refuse_tunnel_if_unsafe >/dev/null 2>&1; then
   fail "refuse_tunnel_if_unsafe is still defined"
 fi
-if grep -R -n 'pkill' "${ROOT}/ops" >/dev/null; then
+if grep -R -n 'pkill' --include='*.sh' "${ROOT}/ops" >/dev/null; then
   fail "ops scripts still call pkill"
 fi
 
@@ -111,12 +137,40 @@ wait "${sleep_pid}" 2>/dev/null || true
 sleep_pid=""
 echo "ok pid identity and boot id"
 
+set +e
+# shellcheck disable=SC2016
+env \
+  TWILIO_BRIDGE_RUN_DIR="${TMP}/mismatch-run" \
+  TWILIO_BRIDGE_LOG_DIR="${TMP}/mismatch-log" \
+  BRIDGE_HOME="${TMP}/home" \
+  BRIDGE_ENV_FILE="${TMP}/other.env" \
+  bash -c 'source "$1"' bash "${ROOT}/ops/common.sh" >"${TMP}/mismatch.log" 2>&1
+mismatch_rc=$?
+set -e
+if [[ "${mismatch_rc}" -eq 0 ]]; then
+  fail "foreign BRIDGE_ENV_FILE was accepted at startup"
+fi
+set +e
+(
+  # shellcheck disable=SC2034
+  BRIDGE_ENV_FILE="${TMP}/other.env"
+  bridge_port
+) >"${TMP}/port-mismatch.log" 2>&1
+port_mismatch_rc=$?
+set -e
+if [[ "${port_mismatch_rc}" -eq 0 ]]; then
+  fail "bridge_port accepted a foreign BRIDGE_ENV_FILE"
+fi
+
+fixture="${TMP}/checkout"
+mkdir -p "${fixture}/node_modules"
+ln -sfn "${ROOT}/node_modules/dotenv" "${fixture}/node_modules/dotenv"
 printf '%s\n' \
   'BRIDGE_API_KEY=   # set later' \
   'ALLOW_UNAUTHENTICATED_OPERATOR=1 # demo' \
   'export KEY=' \
   'PORT=3000 # listen port' \
-  > "${BRIDGE_ENV_FILE}"
+  > "${fixture}/.env"
 node -e '
 const fs = require("fs");
 const dotenv = require(process.argv[1]);
@@ -126,21 +180,32 @@ assert(parsed.BRIDGE_API_KEY === "", "BRIDGE_API_KEY parsed as " + JSON.stringif
 assert(parsed.ALLOW_UNAUTHENTICATED_OPERATOR === "1", "ALLOW parsed as " + JSON.stringify(parsed.ALLOW_UNAUTHENTICATED_OPERATOR));
 assert(parsed.KEY === "", "export KEY parsed as " + JSON.stringify(parsed.KEY));
 assert(parsed.PORT === "3000", "PORT parsed as " + JSON.stringify(parsed.PORT));
-' "${ROOT}/node_modules/dotenv" "${BRIDGE_ENV_FILE}"
-if [[ "$(bridge_port)" != "3000" ]]; then
+' "${ROOT}/node_modules/dotenv" "${fixture}/.env"
+fixture_port="$(
+  BRIDGE_DIR="${fixture}" BRIDGE_ENV_FILE="${fixture}/.env" bridge_port
+)"
+if [[ "${fixture_port}" != "3000" ]]; then
   fail "bridge_port did not apply dotenv inline comments"
 fi
-printf 'export PORT=3999\n' > "${BRIDGE_ENV_FILE}"
-if [[ "$(bridge_port)" != "3999" ]]; then
+printf 'export PORT=3999\n' > "${fixture}/.env"
+fixture_port="$(
+  BRIDGE_DIR="${fixture}" BRIDGE_ENV_FILE="${fixture}/.env" bridge_port
+)"
+if [[ "${fixture_port}" != "3999" ]]; then
   fail "bridge_port did not apply export PORT"
 fi
-printf 'PORT=\n' > "${BRIDGE_ENV_FILE}"
-if [[ "$(bridge_port)" != "3000" ]]; then
+printf 'PORT=\n' > "${fixture}/.env"
+fixture_port="$(
+  BRIDGE_DIR="${fixture}" BRIDGE_ENV_FILE="${fixture}/.env" bridge_port
+)"
+if [[ "${fixture_port}" != "3000" ]]; then
   fail "empty PORT should fall back to 3000"
 fi
-printf 'PORT=0\n' > "${BRIDGE_ENV_FILE}"
+printf 'PORT=0\n' > "${fixture}/.env"
 set +e
-( bridge_port ) >"${TMP}/port0.log" 2>&1
+(
+  BRIDGE_DIR="${fixture}" BRIDGE_ENV_FILE="${fixture}/.env" bridge_port
+) >"${TMP}/port0.log" 2>&1
 port0_rc=$?
 set -e
 if [[ "${port0_rc}" -eq 0 ]]; then
@@ -170,12 +235,17 @@ const server = http.createServer((req, res) => {
   }
   res.end(JSON.stringify({ ok: true, authRequired: mode === 'open', hmacAuth: true }));
 });
-server.listen(0, '127.0.0.1', () => {
+const port = Number(process.argv[3] || 0);
+server.listen(port, '127.0.0.1', () => {
   process.stdout.write(String(server.address().port));
 });
 EOF
 printf 'closed\n' > "${TMP}/health-mode"
-node "${TMP}/health.js" "${TMP}/health-mode" > "${TMP}/health.port" &
+real_port="$(bridge_port)"
+if port_listening "${real_port}"; then
+  fail "port ${real_port} is already in use; cannot bind the health fixture"
+fi
+node "${TMP}/health.js" "${TMP}/health-mode" "${real_port}" > "${TMP}/health.port" &
 health_pid=$!
 for _ in $(seq 1 50); do
   if [[ -s "${TMP}/health.port" ]]; then
@@ -184,22 +254,47 @@ for _ in $(seq 1 50); do
   sleep 0.05
 done
 hport="$(tr -d '[:space:]' < "${TMP}/health.port")"
-if [[ -z "${hport}" ]]; then
-  fail "health fixture did not listen"
+if [[ -z "${hport}" || "${hport}" != "${real_port}" ]]; then
+  fail "health fixture did not listen on the checkout port"
 fi
-printf 'PORT=%s\nBRIDGE_API_KEY=   # set later\nALLOW_UNAUTHENTICATED_OPERATOR=1 # demo\nexport KEY=\n' "${hport}" > "${BRIDGE_ENV_FILE}"
-if [[ "$(bridge_port)" != "${hport}" ]]; then
-  fail "bridge_port did not track the health fixture port"
-fi
+printf '%s\n' \
+  'ALLOW_UNAUTHENTICATED_OPERATOR: 1' \
+  'KEY=#none' \
+  'BRIDGE_API_KEY=#none' \
+  'PORT=3000 # c' \
+  > "${TMP}/bypass.env"
+node -e '
+const fs = require("fs");
+const dotenv = require(process.argv[1]);
+const parsed = dotenv.parse(fs.readFileSync(process.argv[2]));
+const assert = (cond, msg) => { if (!cond) { console.error(msg); process.exit(1); } };
+assert(parsed.ALLOW_UNAUTHENTICATED_OPERATOR === "1", "colon ALLOW parsed as " + JSON.stringify(parsed.ALLOW_UNAUTHENTICATED_OPERATOR));
+assert(parsed.KEY === "", "KEY=#none parsed as " + JSON.stringify(parsed.KEY));
+assert(parsed.BRIDGE_API_KEY === "", "BRIDGE_API_KEY=#none parsed as " + JSON.stringify(parsed.BRIDGE_API_KEY));
+assert(parsed.PORT === "3000", "PORT parsed as " + JSON.stringify(parsed.PORT));
+' "${ROOT}/node_modules/dotenv" "${TMP}/bypass.env"
 if bridge_accepts_tunnel "${hport}"; then
-  fail "authRequired false was accepted (inline-comment .env must not open the tunnel)"
+  fail "authRequired false was accepted"
+fi
+if (
+  ALLOW_UNAUTHENTICATED_OPERATOR=1
+  BRIDGE_API_KEY=
+  : "${ALLOW_UNAUTHENTICATED_OPERATOR}" "${BRIDGE_API_KEY}"
+  bridge_accepts_tunnel "${hport}"
+); then
+  fail "shell ALLOW=1 and an empty BRIDGE_API_KEY opened the tunnel while health authRequired was false"
 fi
 if grep -q 'set later' "${TMP}/log/ops.log" 2>/dev/null; then
   fail "health gate logged .env comment text"
 fi
 printf 'open\n' > "${TMP}/health-mode"
-if ! bridge_accepts_tunnel "${hport}"; then
-  fail "authRequired true was rejected"
+if ! (
+  ALLOW_UNAUTHENTICATED_OPERATOR=1
+  BRIDGE_API_KEY=
+  : "${ALLOW_UNAUTHENTICATED_OPERATOR}" "${BRIDGE_API_KEY}"
+  bridge_accepts_tunnel "${hport}"
+); then
+  fail "authRequired true was rejected while the shell looked open"
 fi
 printf 'string\n' > "${TMP}/health-mode"
 if bridge_accepts_tunnel "${hport}"; then
@@ -352,7 +447,36 @@ fi
 echo "ok process identity"
 
 export PROC_ROOT="/proc"
-printf 'PORT=3000\n' > "${BRIDGE_ENV_FILE}"
+
+# Keep the shell alive. A trailing wait stops bash from exec'ing tail,
+# which is the parent-shell case the old substring kill hit.
+# shellcheck disable=SC2016
+bash -c 'cd "$1"; tail -f src/server.js & wait' bash "${ROOT}" >/dev/null 2>&1 &
+tail_parent=$!
+for _ in $(seq 1 50); do
+  tail_child="$(ps -o pid= --ppid "${tail_parent}" 2>/dev/null | awk 'NR==1 { print $1 }' || true)"
+  if [[ -n "${tail_child}" ]]; then
+    break
+  fi
+  sleep 0.05
+done
+if [[ -z "${tail_child}" ]]; then
+  fail "tail child did not start"
+fi
+if bridge_process_matches "${tail_parent}"; then
+  fail "parent shell of tail -f src/server.js matched the bridge"
+fi
+if bridge_process_matches "${tail_child}"; then
+  fail "tail -f src/server.js matched the bridge"
+fi
+if ! tr '\0' ' ' < "/proc/${tail_child}/cmdline" | grep -q 'src/server.js'; then
+  fail "tail cmdline did not include src/server.js"
+fi
+kill "${tail_child}" "${tail_parent}" 2>/dev/null || true
+wait "${tail_parent}" 2>/dev/null || true
+tail_parent=""
+tail_child=""
+echo "ok live tail is not the bridge"
 
 mark_disabled
 : > "${LOG_DIR}/ops.log"
@@ -417,7 +541,6 @@ fi
 echo "ok start clears SKIP_TUNNEL"
 
 printf 'closed\n' > "${TMP}/health-mode"
-printf 'PORT=%s\n' "${hport}" > "${BRIDGE_ENV_FILE}"
 cat > "${TMP}/tunnel-bin" << EOF
 #!/bin/sh
 echo ran >> "${TMP}/tunnel-ran"
@@ -502,5 +625,175 @@ if [[ "${curl_rc}" -ne 1 ]]; then
   fail "missing curl should exit 1 (rc=${curl_rc})"
 fi
 echo "ok missing curl fails loudly"
+
+export CLOUDFLARED_BIN="${TMP}/cloudflared-not-real"
+export CLOUDFLARED_CONFIG="${TMP}/cloudflared-not-real.yml"
+export TUNNEL_NAME="ops-test-tunnel-not-real"
+printf 'tunnel: example\n' > "${CLOUDFLARED_CONFIG}"
+
+printf 'closed\n' > "${TMP}/health-mode"
+sleep 60 &
+tunnel_sleeper=$!
+write_pidfile "${RUN_DIR}/tunnel.pid" "${tunnel_sleeper}"
+sleep 60 &
+tunnel_sup_sleeper=$!
+write_pidfile "${RUN_DIR}/tunnel.supervisor.pid" "${tunnel_sup_sleeper}"
+unset SKIP_TUNNEL
+"${ROOT}/ops/supervise.sh" bridge -- sleep 60 >"${TMP}/bridge-closed.out" 2>&1 &
+sup_pid=$!
+stopped=0
+for _ in $(seq 1 80); do
+  if ! kill -0 "${tunnel_sleeper}" 2>/dev/null && ! kill -0 "${tunnel_sup_sleeper}" 2>/dev/null; then
+    stopped=1
+    break
+  fi
+  sleep 0.25
+done
+if [[ "${stopped}" -ne 1 ]]; then
+  fail "bridge restart left the tunnel running when authRequired was false"
+fi
+if ! grep -q 'stopping cloudflared because' "${LOG_DIR}/ops.log"; then
+  fail "bridge restart did not log that cloudflared was stopped"
+fi
+bridge_child="$(read_pidfile "${RUN_DIR}/bridge.pid")"
+if ! kill -0 "${bridge_child}" 2>/dev/null; then
+  fail "bridge restart stopped the bridge child"
+fi
+kill -TERM "${sup_pid}" 2>/dev/null || true
+wait "${sup_pid}" 2>/dev/null || true
+sup_pid=""
+tunnel_sleeper=""
+tunnel_sup_sleeper=""
+
+printf 'open\n' > "${TMP}/health-mode"
+sleep 60 &
+tunnel_sleeper=$!
+write_pidfile "${RUN_DIR}/tunnel.pid" "${tunnel_sleeper}"
+sleep 60 &
+tunnel_sup_sleeper=$!
+write_pidfile "${RUN_DIR}/tunnel.supervisor.pid" "${tunnel_sup_sleeper}"
+"${ROOT}/ops/supervise.sh" bridge -- sleep 60 >"${TMP}/bridge-open.out" 2>&1 &
+sup_pid=$!
+sleep 1
+if ! kill -0 "${tunnel_sleeper}" 2>/dev/null || ! kill -0 "${tunnel_sup_sleeper}" 2>/dev/null; then
+  fail "bridge restart stopped the tunnel when authRequired was true"
+fi
+kill -TERM "${sup_pid}" 2>/dev/null || true
+wait "${sup_pid}" 2>/dev/null || true
+sup_pid=""
+kill "${tunnel_sleeper}" "${tunnel_sup_sleeper}" 2>/dev/null || true
+wait "${tunnel_sleeper}" 2>/dev/null || true
+wait "${tunnel_sup_sleeper}" 2>/dev/null || true
+tunnel_sleeper=""
+tunnel_sup_sleeper=""
+
+printf 'closed\n' > "${TMP}/health-mode"
+sleep 60 &
+tunnel_sleeper=$!
+write_pidfile "${RUN_DIR}/tunnel.pid" "${tunnel_sleeper}"
+SKIP_TUNNEL=1 "${ROOT}/ops/supervise.sh" bridge -- sleep 30 >"${TMP}/bridge-skip.out" 2>&1 &
+sup_pid=$!
+sleep 1
+if ! kill -0 "${tunnel_sleeper}" 2>/dev/null; then
+  fail "SKIP_TUNNEL=1 stopped the tunnel on bridge start"
+fi
+kill -TERM "${sup_pid}" 2>/dev/null || true
+wait "${sup_pid}" 2>/dev/null || true
+sup_pid=""
+kill "${tunnel_sleeper}" 2>/dev/null || true
+wait "${tunnel_sleeper}" 2>/dev/null || true
+tunnel_sleeper=""
+unset SKIP_TUNNEL
+echo "ok bridge restart health gate"
+
+install_home="${TMP}/install-home"
+mkdir -p "${install_home}/bin" "${TMP}/frozen-run"
+cat > "${install_home}/bin/crontab" << 'EOF'
+#!/bin/bash
+set -euo pipefail
+file="${CRON_CAPTURE:?}"
+if [[ "${1:-}" == "-l" ]]; then
+  if [[ -f "${file}" ]]; then
+    cat "${file}"
+  fi
+  exit 0
+fi
+if [[ "${1:-}" == "-" ]]; then
+  cat > "${file}"
+  exit 0
+fi
+echo "unexpected crontab args" >&2
+exit 1
+EOF
+chmod +x "${install_home}/bin/crontab"
+: > "${TMP}/cron-capture"
+env \
+  HOME="${install_home}" \
+  BRIDGE_HOME="${install_home}" \
+  TWILIO_BRIDGE_RUN_DIR="${TMP}/frozen-run" \
+  TWILIO_BRIDGE_LOG_DIR="${TMP}/install-log" \
+  PATH="${install_home}/bin:${PATH}" \
+  CRON_CAPTURE="${TMP}/cron-capture" \
+  "${ROOT}/ops/install-boot.sh" >"${TMP}/install1.log" 2>&1
+if ! grep -Fq "TWILIO_BRIDGE_RUN_DIR=${TMP}/frozen-run" "${install_home}/.profile"; then
+  fail "profile hook did not pin TWILIO_BRIDGE_RUN_DIR"
+fi
+if ! grep -Fq "TWILIO_BRIDGE_RUN_DIR=${TMP}/frozen-run" "${TMP}/cron-capture"; then
+  fail "crontab did not pin TWILIO_BRIDGE_RUN_DIR"
+fi
+profile_markers="$(grep -c 'twilio-bridge-boot' "${install_home}/.profile")"
+cron_markers="$(grep -c 'twilio-bridge-boot' "${TMP}/cron-capture")"
+if [[ "${profile_markers}" -ne 1 || "${cron_markers}" -ne 1 ]]; then
+  fail "install duplicated a boot hook"
+fi
+env \
+  HOME="${install_home}" \
+  BRIDGE_HOME="${install_home}" \
+  TWILIO_BRIDGE_RUN_DIR="${TMP}/frozen-run" \
+  TWILIO_BRIDGE_LOG_DIR="${TMP}/install-log" \
+  PATH="${install_home}/bin:${PATH}" \
+  CRON_CAPTURE="${TMP}/cron-capture" \
+  "${ROOT}/ops/install-boot.sh" >"${TMP}/install2.log" 2>&1
+profile_markers="$(grep -c 'twilio-bridge-boot' "${install_home}/.profile")"
+cron_markers="$(grep -c 'twilio-bridge-boot' "${TMP}/cron-capture")"
+if [[ "${profile_markers}" -ne 1 || "${cron_markers}" -ne 1 ]]; then
+  fail "second install duplicated a boot hook"
+fi
+cat > "${install_home}/.profile" << EOF
+echo keep-profile
+# twilio-bridge-boot
+# Auto-start the bridge and cloudflared tunnel if they are not already running.
+[ -x /old/boot.sh ] && ( /old/boot.sh >/dev/null 2>&1 & )
+EOF
+printf '%s\n' \
+  '# user-line' \
+  '0 0 * * * echo keep' \
+  '# twilio-bridge-boot' \
+  '@reboot /old/boot.sh >> /tmp/old.log 2>&1' \
+  > "${TMP}/cron-capture"
+env \
+  HOME="${install_home}" \
+  BRIDGE_HOME="${install_home}" \
+  TWILIO_BRIDGE_RUN_DIR="${TMP}/frozen-run" \
+  TWILIO_BRIDGE_LOG_DIR="${TMP}/install-log" \
+  PATH="${install_home}/bin:${PATH}" \
+  CRON_CAPTURE="${TMP}/cron-capture" \
+  "${ROOT}/ops/install-boot.sh" >"${TMP}/install3.log" 2>&1
+if ! grep -q 'keep-profile' "${install_home}/.profile"; then
+  fail "profile rewrite dropped unrelated lines"
+fi
+if grep -q '/old/boot.sh' "${install_home}/.profile" "${TMP}/cron-capture"; then
+  fail "stale boot hook remained"
+fi
+if ! grep -q 'echo keep' "${TMP}/cron-capture"; then
+  fail "crontab rewrite dropped a user line"
+fi
+if ! grep -Fq "TWILIO_BRIDGE_RUN_DIR=${TMP}/frozen-run" "${install_home}/.profile"; then
+  fail "rewritten profile hook did not pin TWILIO_BRIDGE_RUN_DIR"
+fi
+if ! grep -Fq "TWILIO_BRIDGE_RUN_DIR=${TMP}/frozen-run" "${TMP}/cron-capture"; then
+  fail "rewritten crontab did not pin TWILIO_BRIDGE_RUN_DIR"
+fi
+echo "ok install pins RUN_DIR"
 
 echo "All ops tests passed"

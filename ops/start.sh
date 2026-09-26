@@ -54,8 +54,8 @@ reclaim_bridge_port() {
 clear_disabled
 save_skip_tunnel
 
-if [[ ! -f "${BRIDGE_DIR}/.env" && ! -f "${BRIDGE_ENV_FILE}" ]]; then
-  log "ERROR: missing ${BRIDGE_DIR}/.env (node loads this file; BRIDGE_ENV_FILE is only the port probe)"
+if [[ ! -f "${BRIDGE_DIR}/.env" ]]; then
+  log "ERROR: missing ${BRIDGE_DIR}/.env (node loads this file)"
   exit 1
 fi
 if [[ -z "${NODE_BIN}" || ! -x "${NODE_BIN}" ]]; then

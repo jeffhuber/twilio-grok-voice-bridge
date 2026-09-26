@@ -47,6 +47,20 @@ BRIDGE_ENV_FILE="${BRIDGE_ENV_FILE:-${BRIDGE_DIR}/.env}"
 LOG_MAX_BYTES="${TWILIO_BRIDGE_LOG_MAX_BYTES:-5242880}"
 PROC_ROOT="${PROC_ROOT:-/proc}"
 
+# Node always loads ${BRIDGE_DIR}/.env (dotenv, cwd is the checkout). A different
+# BRIDGE_ENV_FILE would make the port probe disagree with the process.
+require_bridge_env_file() {
+  local expected actual
+  expected="$(readlink -f "${BRIDGE_DIR}/.env" 2>/dev/null || true)"
+  actual="$(readlink -f "${BRIDGE_ENV_FILE}" 2>/dev/null || true)"
+  if [[ -z "${expected}" || -z "${actual}" || "${actual}" != "${expected}" ]]; then
+    log "ERROR: BRIDGE_ENV_FILE must be ${BRIDGE_DIR}/.env because node loads that file. Refusing."
+    exit 1
+  fi
+}
+
+require_bridge_env_file
+
 if [[ -z "${NODE_BIN:-}" ]]; then
   NODE_BIN="$(command -v node || true)"
 fi
@@ -238,15 +252,14 @@ read_cmdline() {
   [[ ${#CMDLINE_ARGS[@]} -gt 0 ]]
 }
 
-# PORT the way src/server.js computes it: the dotenv file overrides the environment,
+# PORT the way src/server.js computes it: ${BRIDGE_DIR}/.env overrides the environment,
 # then Number(value || 3000). Environment values are strings, so "0" stays 0 and is
 # rejected below (empty PORT still falls back to 3000). Inline comments are dotenv's.
+# BRIDGE_ENV_FILE must resolve to that same path; node does not load a different file.
 bridge_port() {
   local file="${BRIDGE_DIR}/.env"
   local port
-  if [[ -n "${BRIDGE_ENV_FILE:-}" ]]; then
-    file="${BRIDGE_ENV_FILE}"
-  fi
+  require_bridge_env_file
   if [[ -z "${NODE_BIN}" || ! -x "${NODE_BIN}" ]]; then
     log "ERROR: node binary not found; set NODE_BIN"
     exit 1

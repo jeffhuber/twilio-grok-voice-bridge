@@ -80,6 +80,18 @@ while true; do
   write_pidfile "${CHILD_PIDFILE}" "${child_pid}"
   printf '[%s] child pid=%s\n' "$(ts)" "${child_pid}" >> "${SUP_LOG}"
 
+  # Each bridge start, including a restart, must see authRequired true or the
+  # tunnel comes down. The bridge child itself is left running.
+  if [[ "${NAME}" == "bridge" && "${SKIP_TUNNEL:-}" != "1" ]]; then
+    port="$(bridge_port)"
+    if ! wait_for_tunnel_auth "${port}" 10; then
+      log "stopping cloudflared because http://127.0.0.1:${port}/health authRequired is not true"
+      stop_recorded_pid "${RUN_DIR}/tunnel.supervisor.pid" "tunnel-supervisor" 2
+      stop_recorded_pid "${RUN_DIR}/tunnel.pid" "tunnel-child" 2
+      stop_matching_processes cloudflared_process_matches "cloudflared"
+    fi
+  fi
+
   set +e
   wait "${child_pid}"
   rc=$?
