@@ -574,7 +574,7 @@ function buildInstructions(goal, context, style) {
   ].join('\n');
 }
 
-function createSession({ callSid, goal, context, voice, style, to, softContinue }) {
+function createSession({ callSid, goal, context, voice, style, to, softContinue, openerOnConnect }) {
   const resolvedStyle = resolveStyle({ style });
   const soft = Boolean(softContinue);
   /** @type {CallSession} */
@@ -586,6 +586,9 @@ function createSession({ callSid, goal, context, voice, style, to, softContinue 
     style: resolvedStyle,
     to: to || '',
     softContinue: soft,
+    openerOnConnect: typeof openerOnConnect === 'boolean' ? openerOnConnect : undefined,
+    openerSent: false,
+    awaitingAudioConfigAck: false,
     twilioWs: null,
     grokWs: null,
     transcript: [],
@@ -873,6 +876,39 @@ function buildSessionUpdate(session) {
   };
 }
 
+function connectOpenerEnabled(session) {
+  if (session && session.openerOnConnect === false) return false;
+  if (session && session.openerOnConnect === true) return true;
+  return process.env.OPENER_ON_CONNECT !== '0';
+}
+
+function markInitialAudioConfigSent(session) {
+  if (!session.openerSent) session.awaitingAudioConfigAck = true;
+}
+
+/**
+ * One greeting after the initial audio format has been acknowledged.
+ * Later session.updated events (voice, VAD, steer) must not greet again.
+ * @param {CallSession} session
+ * @param {(session: CallSession, obj: object) => void} [send]
+ * @returns {boolean}
+ */
+function maybeSendConnectOpener(session, send) {
+  if (!session.awaitingAudioConfigAck || session.openerSent) return false;
+  session.awaitingAudioConfigAck = false;
+  session.openerSent = true;
+  if (!connectOpenerEnabled(session)) return false;
+  const emit = send || sendGrok;
+  emit(session, { type: 'response.create' });
+  return true;
+}
+
+function onGrokSocketOpen(session, send) {
+  const emit = send || sendGrok;
+  emit(session, buildSessionUpdate(session));
+  markInitialAudioConfigSent(session);
+}
+
 function openGrokSession(session) {
   if (!XAI_API_KEY) {
     console.error('[grok] XAI_API_KEY not set');
@@ -894,7 +930,7 @@ function openGrokSession(session) {
 
   grokWs.on('open', () => {
     console.log(`[grok] open callSid=${session.callSid}`);
-    sendGrok(session, buildSessionUpdate(session));
+    onGrokSocketOpen(session);
   });
 
   grokWs.on('message', (data, isBinary) => {
@@ -935,13 +971,18 @@ function openGrokSession(session) {
   });
 }
 
-function handleGrokEvent(session, event) {
+function handleGrokEvent(session, event, deps) {
   const type = event.type || '';
+  const send = (deps && deps.sendGrok) || sendGrok;
 
   switch (type) {
     case 'session.created':
+      console.log(`[grok] ${type}`);
+      break;
+
     case 'session.updated':
       console.log(`[grok] ${type}`);
+      maybeSendConnectOpener(session, send);
       break;
 
     case 'response.output_audio.delta':
@@ -1415,7 +1456,7 @@ app.all('/twiml-connect', (req, res) => {
 app.post('/call', requireBridgeAuth, async (req, res) => {
   let tempId = null;
   try {
-    const { to, goal, context, voice, style, softContinue } = req.body || {};
+    const { to, goal, context, voice, style, softContinue, openerOnConnect } = req.body || {};
     if (!to || !goal) {
       return res.status(400).json({ error: 'to and goal are required' });
     }
@@ -1429,6 +1470,7 @@ app.post('/call', requireBridgeAuth, async (req, res) => {
     const resolvedVoice = resolveVoiceId(voice || XAI_VOICE);
     const resolvedStyle = resolveStyle({ style });
     const wantSoft = Boolean(softContinue);
+    const openerFlag = typeof openerOnConnect === 'boolean' ? openerOnConnect : undefined;
     
     if (!PUBLIC_HOST) {
       return res.status(500).json({ error: 'PUBLIC_HOST not set' });
@@ -1444,6 +1486,7 @@ app.post('/call', requireBridgeAuth, async (req, res) => {
       style: resolvedStyle,
       to,
       softContinue: wantSoft,
+      openerOnConnect: openerFlag,
     });
     pendingByCallSid.set(tempId, session);
     
@@ -1815,9 +1858,19 @@ wss.on('connection', (ws, req) => {
   });
 });
 
-server.listen(PORT, () => {
-  console.log(`[server] listening on :${PORT}`);
-  console.log(`[server] PUBLIC_HOST=${PUBLIC_HOST || '(not set)'}`);
-  console.log(`[server] media stream wss://${PUBLIC_HOST || 'PUBLIC_HOST'}/media-stream`);
-  console.log(`[server] voice=${XAI_VOICE} model=${XAI_MODEL}`);
-});
+if (require.main === module) {
+  server.listen(PORT, () => {
+    console.log(`[server] listening on :${PORT}`);
+    console.log(`[server] PUBLIC_HOST=${PUBLIC_HOST || '(not set)'}`);
+    console.log(`[server] media stream wss://${PUBLIC_HOST || 'PUBLIC_HOST'}/media-stream`);
+    console.log(`[server] voice=${XAI_VOICE} model=${XAI_MODEL}`);
+  });
+}
+
+module.exports = {
+  app,
+  createSession,
+  handleGrokEvent,
+  onGrokSocketOpen,
+  connectOpenerEnabled,
+};

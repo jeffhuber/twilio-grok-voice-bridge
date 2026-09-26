@@ -47,6 +47,11 @@ jobs:
         run: |
           echo "=== Running privacy defaults test ==="
           bash scripts/test-privacy-defaults.sh
+
+      - name: Run connect opener tests
+        env:
+          BRIDGE_API_KEY: ci-test-key
+        run: node test/test-opener-on-connect.js
       
       - name: Run body-parser safety test
         env:
