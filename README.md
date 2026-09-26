@@ -125,7 +125,7 @@ The `/media-stream` WebSocket endpoint uses **HMAC-SHA256 signature-based authen
 
 **Crash containment:** All WebSocket message handlers validate and parse JSON defensively. Malformed or null frames are logged and ignored per-socket; parsing errors never crash the Node process.
 
-**Session garbage collection:** Orphan sessions (both WebSockets closed) and sessions exceeding `SESSION_MAX_AGE_MS` (default 2 hours) are automatically cleaned up every 2 minutes. This prevents memory leaks from interrupted or abandoned calls.
+**Session garbage collection:** Every 2 minutes, a session whose Twilio and Grok sockets are both not open is removed without a hangup. A session that still has a socket open and is older than `SESSION_MAX_AGE_MS` (default 2 hours) is hung up. This prevents memory leaks from interrupted or abandoned calls.
 
 **One stream per CallSid:** The bridge enforces one active Twilio Media Stream per CallSid. Duplicate stream attempts for the same call are rejected with WebSocket close code 1008.
 
@@ -166,7 +166,7 @@ For public hosts, **always** use one of:
 
 ## Environment table
 
-Values are read from the process environment (dotenv with `override: true`). `ALLOW_UNAUTHENTICATED_OPERATOR`, `ENABLE_RECORDING`, `SKIP_AI_DISCLOSURE`, and `LOG_TRANSCRIPTS` are on only when the value is exactly `1`. `true`, `yes`, and `0` do not turn them on.
+Values are read from the process environment. `src/server.js` calls `require('dotenv').config({ override: true })`, so values in `.env` replace existing environment variables. `ALLOW_UNAUTHENTICATED_OPERATOR`, `ENABLE_RECORDING`, `SKIP_AI_DISCLOSURE`, and `LOG_TRANSCRIPTS` are on only when the value is exactly `1`. `true`, `yes`, and `0` do not turn them on.
 
 Numeric settings use `Number(process.env.NAME || default)`. The environment value is a string, so `"0"` is kept and becomes numeric 0; it is not replaced by the default. An empty or unset value uses the default. `Number(value) || default` would drop numeric 0; these settings do not use that form.
 
@@ -174,7 +174,7 @@ The process calls `process.exit(1)` at startup when `BRIDGE_API_KEY` is unset or
 
 `TWILIO_AUTH_TOKEN` enables `X-Twilio-Signature` checks on `/twiml-connect` only when it is non-empty. The signed URL is `https://${PUBLIC_HOST}` plus the request path and query. If `PUBLIC_HOST` is not the host Twilio used, validation fails with **403**. An empty `PUBLIC_HOST` makes `POST /call` return 500 and makes `/twiml-connect` return 500 when it builds TwiML.
 
-Media-stream HMAC uses `MEDIA_STREAM_SECRET` when that value is non-empty after trim, otherwise `BRIDGE_API_KEY`. If both are empty, signature minting throws and `/twiml-connect` returns 500. `ALLOW_UNAUTHENTICATED_OPERATOR=1` leaves operator routes open and still allows calls to complete when `MEDIA_STREAM_SECRET` is set.
+Media-stream HMAC uses `MEDIA_STREAM_SECRET` when that value is non-empty after trim and `BRIDGE_API_KEY` is set; otherwise it uses `BRIDGE_API_KEY`. Both keys are read once at startup. Signatures are not minted or verified when `BRIDGE_API_KEY` is unset, even if `MEDIA_STREAM_SECRET` is set, and `/twiml-connect` returns 500 because minting throws. `ALLOW_UNAUTHENTICATED_OPERATOR=1` leaves operator routes open and does not let calls complete the media handshake.
 
 | Variable | Purpose | Default |
 |----------|---------|---------|
@@ -188,14 +188,14 @@ Media-stream HMAC uses `MEDIA_STREAM_SECRET` when that value is non-empty after 
 | `VOICE_ALIASES` | JSON object merged over built-in aliases (`ara`, `eve`, `rex`, `sal`) | unset |
 | `PORT` | HTTP listen port | `3000` |
 | `PUBLIC_HOST` | Public hostname only (no scheme). Wrong value causes 403s when a Twilio token is set | unset |
-| `BRIDGE_API_KEY` | Operator secret (Bearer or `X-Bridge-Key`). Also the media HMAC key when `MEDIA_STREAM_SECRET` is empty | unset; process exits unless the override below is exactly `1` |
-| `MEDIA_STREAM_SECRET` | Media HMAC key when non-empty after trim. When empty, HMAC uses `BRIDGE_API_KEY` | unset |
-| `ALLOW_UNAUTHENTICATED_OPERATOR` | Exactly `1` starts without `BRIDGE_API_KEY` and leaves operator routes open | off |
+| `BRIDGE_API_KEY` | Operator secret (Bearer or `X-Bridge-Key`). Required for media HMAC. When `MEDIA_STREAM_SECRET` is empty, this value is the HMAC key | unset; process exits unless the override below is exactly `1` |
+| `MEDIA_STREAM_SECRET` | Dedicated media HMAC key only when `BRIDGE_API_KEY` is also set. When non-empty after trim, signatures use this instead of `BRIDGE_API_KEY`. If `BRIDGE_API_KEY` is unset, signatures are not minted or verified | unset |
+| `ALLOW_UNAUTHENTICATED_OPERATOR` | Exactly `1` starts without `BRIDGE_API_KEY` and leaves operator routes open. It does not enable media HMAC | off |
 | `MEDIA_AUTH_WINDOW_MS` | HMAC timestamp window in milliseconds | `120000` |
-| `SESSION_MAX_AGE_MS` | Maximum session age before cleanup, milliseconds | `7200000` |
+| `SESSION_MAX_AGE_MS` | A session older than this with a socket still open is hung up. A session with both sockets already closed is removed without a hangup, at any age | `7200000` |
 | `ENABLE_RECORDING` | Exactly `1` passes `record: true` and dual-channel recording to Twilio | off |
 | `SKIP_AI_DISCLOSURE` | Exactly `1` omits the AI disclosure block from instructions | off (disclosure on) |
-| `LOG_TRANSCRIPTS` | Exactly `1` writes transcript lines to stdout. Destination numbers in the call log are masked either way | off |
+| `LOG_TRANSCRIPTS` | Exactly `1` writes transcript lines to stdout. The placed-call log masks the destination. A Twilio client error is logged as `err.message` without that mask | off |
 | `CONTACT_FULL_NAME` | Optional name for restaurant-book instructions | unset |
 | `CONTACT_MOBILE` | Optional callback number for restaurant-book instructions | unset |
 | `VAD_THRESHOLD` | Server VAD threshold | `0.7` |
@@ -232,18 +232,18 @@ Optional softContinue true on POST /call enables post-playback soft-continue.
 
 ## Security notes
 
-- **BRIDGE_API_KEY**: The process exits unless this is set or `ALLOW_UNAUTHENTICATED_OPERATOR` is exactly `1`. It is the operator secret, and it is the media HMAC key only when `MEDIA_STREAM_SECRET` is empty. With neither secret, `/twiml-connect` returns 500 because signature minting throws.
+- **BRIDGE_API_KEY**: The process exits unless this is set or `ALLOW_UNAUTHENTICATED_OPERATOR` is exactly `1`. It is required for media HMAC. When `MEDIA_STREAM_SECRET` is empty, this value is the HMAC key. Signatures are not minted or verified when `BRIDGE_API_KEY` is unset, even if `MEDIA_STREAM_SECRET` is set. `/twiml-connect` then returns 500 because signature minting throws.
 - **Media Stream WebSocket** uses HMAC-SHA256 signature authentication (not bearer tokens). A signature covers a CallSid and timestamp, is single-use in this process, and expires after `MEDIA_AUTH_WINDOW_MS`.
 - **X-Twilio-Signature validation**: Runs on `/twiml-connect` only when `TWILIO_AUTH_TOKEN` is non-empty. The checked URL uses `PUBLIC_HOST`; a different host than the one Twilio signed returns 403.
 - **Recording** is on only when `ENABLE_RECORDING` is exactly `1`.
 - **AI disclosure** stays on unless `SKIP_AI_DISCLOSURE` is exactly `1`.
-- **Privacy defaults:** Destination numbers in the call log are masked. Transcript lines are written to stdout only when `LOG_TRANSCRIPTS` is exactly `1`.
+- **Privacy defaults:** The placed-call log masks the destination. `[call] error:` and a failed Twilio hangup log `err.message` without that mask, and that text can include the number. Transcript lines are written to stdout only when `LOG_TRANSCRIPTS` is exactly `1`.
 - Keep Twilio tokens, xAI keys, BRIDGE_API_KEY, and real phone numbers out of git.
 - Twilio needs a public WSS URL for Media Streams.
 
 ## Deployment requirements
 
-- **An HMAC secret must be available**: `MEDIA_STREAM_SECRET` when non-empty after trim, otherwise `BRIDGE_API_KEY`. `ALLOW_UNAUTHENTICATED_OPERATOR=1` opens operator routes and still mints signatures when `MEDIA_STREAM_SECRET` is set
+- **BRIDGE_API_KEY must be set for media HMAC**. `MEDIA_STREAM_SECRET` is only a separate rotation key and is not used unless the operator key is set. `ALLOW_UNAUTHENTICATED_OPERATOR=1` opens operator routes and does not mint or verify signatures
 - **Sticky/single-node required**: In-memory pending session state means replay protection and session tracking are process-local; load balancers must route all requests from the same call to the same server instance
 - **HTTPS/WSS required**: Twilio Media Streams require secure WebSocket connections
 - **TWILIO_AUTH_TOKEN recommended**: Enables X-Twilio-Signature validation on `/twiml-connect` to prevent sessionId theft

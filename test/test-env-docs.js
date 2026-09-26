@@ -106,6 +106,40 @@ if (!readme.includes('The environment value is a string, so `"0"` is kept')) {
   pass('README documents Number(process.env.NAME || default) and string 0');
 }
 
+if (!code.includes(".config({ override: true })")) {
+  fail('src/server.js does not load dotenv with override true');
+} else if (!readme.includes('values in `.env` replace existing environment variables')) {
+  fail('README does not say .env values replace existing environment variables');
+} else {
+  pass('dotenv override true is documented as .env replacing existing environment variables');
+}
+
+if (example.includes('Drop finished sessions') || readme.includes('Drop finished sessions')) {
+  fail('SESSION_MAX_AGE_MS is still described as dropping finished sessions');
+} else if (!example.includes('hung up') || !example.includes('socket')) {
+  fail('.env.example does not describe live hangup versus closed-socket removal');
+} else if (!readme.includes('still has a socket open') || !readme.includes('hung up')) {
+  fail('README does not describe live hangup for SESSION_MAX_AGE_MS');
+} else {
+  pass('SESSION_MAX_AGE_MS describes hangup of a live session and removal of closed ones');
+}
+
+if (readme.includes('masked either way') || example.includes('masked either way')) {
+  fail('docs still say numbers are masked either way');
+} else if (!readme.includes('err.message')) {
+  fail('README does not say Twilio client errors are logged as err.message');
+} else {
+  pass('placed-call masking is documented separately from the raw Twilio error line');
+}
+
+if (!readme.includes('not minted or verified') || !readme.includes('even if `MEDIA_STREAM_SECRET` is set')) {
+  fail('README does not refuse media HMAC when BRIDGE_API_KEY is unset');
+} else if (!example.includes('not minted or verified')) {
+  fail('.env.example does not refuse media HMAC when BRIDGE_API_KEY is unset');
+} else {
+  pass('media HMAC is documented as requiring BRIDGE_API_KEY');
+}
+
 if (failed > 0) {
   console.error(`\n${failed} env doc check(s) failed`);
   process.exit(1);
