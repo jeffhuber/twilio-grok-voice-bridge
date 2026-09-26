@@ -40,8 +40,19 @@ jobs:
       - name: Syntax check shell scripts
         run: |
           echo "=== Checking shell script syntax with bash -n ==="
-          find scripts -name "*.sh" -type f -exec bash -n {} \;
+          find scripts ops -name "*.sh" -type f -exec bash -n {} \;
           echo "✓ All shell scripts passed syntax check"
+
+      - name: Shellcheck ops scripts
+        run: |
+          if ! command -v shellcheck >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y shellcheck
+          fi
+          shellcheck -x -P SCRIPTDIR ops/*.sh test/test-ops.sh
+
+      - name: Run ops script tests
+        run: bash test/test-ops.sh
       
       - name: Run privacy defaults test
         run: |
