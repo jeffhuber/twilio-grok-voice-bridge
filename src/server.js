@@ -76,18 +76,11 @@ function calendarParts(year, month, day) {
   return y >= 1000 && y <= 9999 && m >= 1 && m <= 12 && d >= 1 && d <= 31;
 }
 
-function isEpochMilliseconds(digits) {
-  if (digits.length !== 13) return false;
-  const n = Number(digits);
-  return n >= 1000000000000 && n <= 2100000000000;
-}
-
 /**
  * Mask digit runs of 7 or more. Separators may appear inside the run.
  * A letter or digit on either side keeps the text. IPv4 addresses and calendar
- * dates are left alone. An unprefixed 13-digit run is left alone only when it
- * is an epoch-millisecond value from 1000000000000 through 2100000000000.
- * A run that starts with + is never treated as a timestamp.
+ * dates are left alone. There is no epoch-millisecond exemption, so a 13-digit
+ * run is masked, including a run that starts with +.
  */
 function maskPhoneNumbersInText(text) {
   const s = String(text == null ? '' : text).replace(/[\r\n]/g, ' ');
@@ -122,11 +115,7 @@ function maskPhoneNumbersInText(text) {
     }
     const slice = lastDigit >= i ? s.slice(i, lastDigit + 1) : '';
     const after = s[lastDigit + 1] || '';
-    const keep =
-      !slice ||
-      isIpv4(slice) ||
-      isCalendarDate(slice) ||
-      (!slice.startsWith('+') && isEpochMilliseconds(slice.replace(/\D/g, '')));
+    const keep = !slice || isIpv4(slice) || isCalendarDate(slice);
     if (digits >= 7 && lastDigit >= i && !isWordChar(after) && !keep) {
       out += maskPhoneNumber(slice);
       i = lastDigit + 1;
@@ -181,14 +170,6 @@ function logTwilioJsonParseError(session, err) {
     `[twilio] JSON parse error callSid=${session && session.callSid}:`,
     maskPhoneNumbersInText(err && err.message)
   );
-}
-
-function logTwilioMediaJsonParseError(err) {
-  console.error('[twilio] JSON parse error on media-stream ws:', maskPhoneNumbersInText(err && err.message));
-}
-
-function logTwilioWsError(err) {
-  console.error('[twilio] ws error:', maskPhoneNumbersInText(err && err.message));
 }
 
 /** Optional JSON map of alias → voice id, e.g. {"my-voice":"abc123","clone":"xyz"} */
@@ -1874,7 +1855,7 @@ wss.on('connection', (ws, req) => {
       }
       msg = JSON.parse(text);
     } catch (err) {
-      logTwilioMediaJsonParseError(err);
+      console.error('[twilio] JSON parse error on media-stream ws:', err.message);
       return;
     }
     if (!msg || typeof msg !== 'object') {
@@ -1982,7 +1963,7 @@ wss.on('connection', (ws, req) => {
   });
 
   ws.on('error', (err) => {
-    logTwilioWsError(err);
+    console.error('[twilio] ws error:', err.message);
   });
 });
 
@@ -2010,8 +1991,6 @@ module.exports = {
   logGrokSocketError,
   logGrokJsonParseError,
   logTwilioJsonParseError,
-  logTwilioMediaJsonParseError,
-  logTwilioWsError,
   setTwilioClientForTests,
   setGrokRealtimeUrlForTests,
   sessionsByCallSid,

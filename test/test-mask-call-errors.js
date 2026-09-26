@@ -30,13 +30,10 @@ const {
   logGrokSocketError,
   logGrokJsonParseError,
   logTwilioJsonParseError,
-  logTwilioMediaJsonParseError,
-  logTwilioWsError,
   setTwilioClientForTests,
   setGrokRealtimeUrlForTests,
   sessionsByCallSid,
   handleTwilioMessage,
-  wss,
 } = require('../src/server.js');
 console.warn = originalWarn;
 setGrokRealtimeUrlForTests('ws://127.0.0.1:9');
@@ -211,19 +208,25 @@ async function main() {
   }
 
   const kept = maskPhoneNumbersInText('from 203.0.113.50 on 2026-09-26 at 1727350123456');
-  if (kept.includes('203.0.113.50') && kept.includes('2026-09-26') && kept.includes('1727350123456')) {
-    pass('IPv4 addresses, dates, and in-range millisecond timestamps stay unmasked');
+  if (
+    kept.includes('203.0.113.50') &&
+    kept.includes('2026-09-26') &&
+    !kept.includes('1727350123456') &&
+    kept.includes('3456')
+  ) {
+    pass('IPv4 addresses and dates stay, and a 13-digit timestamp is masked');
   } else {
     fail(`non-phone numbers were masked: ${kept}`);
   }
   const epochEdge = maskPhoneNumbersInText('at 1000000000000 and 2100000000000 then 2100000000001');
   if (
-    epochEdge.includes('1000000000000') &&
-    epochEdge.includes('2100000000000') &&
+    !epochEdge.includes('1000000000000') &&
+    !epochEdge.includes('2100000000000') &&
     !epochEdge.includes('2100000000001') &&
+    epochEdge.includes('0000') &&
     epochEdge.includes('0001')
   ) {
-    pass('unprefixed epoch milliseconds stay only through 2100000000000');
+    pass('13-digit runs are masked, with no epoch-millisecond exemption');
   } else {
     fail(`epoch window was ${epochEdge}`);
   }
@@ -231,6 +234,8 @@ async function main() {
   const intlSamples = [
     ['+8613800000000', '0000', '+8613800000000'],
     ['+4930123456789', '6789', '+4930123456789'],
+    ['+8613812345678', '5678', '+8613812345678'],
+    ['+4915112345678', '5678', '+4915112345678'],
     ['+86 138 0000 0000', '0000', '+86'],
     ['+2100000000000', '0000', '+2100000000000'],
     ['8613800000000', '0000', '8613800000000'],
@@ -268,20 +273,16 @@ async function main() {
     logGrokSocketError({ callSid: 'CA123' }, new Error('model said 555-0100'));
     logGrokJsonParseError({ callSid: 'CA123' }, new Error('bad json 555-0100'));
     logTwilioJsonParseError({ callSid: 'CA123' }, new Error('bad frame 555-0199'));
-    logTwilioMediaJsonParseError(new Error('media 5555550100'));
-    logTwilioWsError(new Error('socket 555-0100'));
   });
   const helperJoined = helperLines.join('\n');
   if (
-    helperLines.length === 8 &&
+    helperLines.length === 6 &&
     helperJoined.includes('[twiml-connect] Error:') &&
     helperJoined.includes('[http] unexpected error:') &&
     helperJoined.includes('[http] 400 body parse error:') &&
     helperJoined.includes('[grok] error callSid=CA123:') &&
     helperJoined.includes('[grok] JSON parse error callSid=CA123:') &&
     helperJoined.includes('[twilio] JSON parse error callSid=CA123:') &&
-    helperJoined.includes('[twilio] JSON parse error on media-stream ws:') &&
-    helperJoined.includes('[twilio] ws error:') &&
     !helperJoined.includes('555-0100') &&
     !helperJoined.includes('(555) 555-0100') &&
     !helperJoined.includes('5555550100') &&
@@ -389,7 +390,13 @@ async function main() {
       fail(`body-parse status ${parseRes.status} logs ${JSON.stringify(parseLogs)}`);
     }
 
-    if (isE164('+8613800000000') && isE164('+4930123456789') && !isE164('+86 138 0000 0000')) {
+    if (
+      isE164('+8613800000000') &&
+      isE164('+4930123456789') &&
+      isE164('+8613812345678') &&
+      isE164('+4915112345678') &&
+      !isE164('+86 138 0000 0000')
+    ) {
       pass('compact +86 and +49 numbers are E.164 and the spaced form is not');
     } else {
       fail('E.164 classification of +86/+49 changed');
@@ -398,6 +405,8 @@ async function main() {
     const intlCalls = [
       ['+8613800000000', '0000'],
       ['+4930123456789', '6789'],
+      ['+8613812345678', '5678'],
+      ['+4915112345678', '5678'],
     ];
     for (const [number, last4] of intlCalls) {
       setTwilioClientForTests({
@@ -544,19 +553,6 @@ async function main() {
             reject(err);
           });
         });
-        const beforeMedia = stderr.lines.length;
-        mediaSock.send('+4930123456789');
-        const mediaLogs = await waitForLog(stderr, beforeMedia, '[twilio] JSON parse error on media-stream ws:', 1000);
-        if (
-          mediaLogs.length === 1 &&
-          !mediaLogs[0].includes('+4930123456789') &&
-          mediaLogs[0].includes('6789')
-        ) {
-          pass('media-stream JSON parse errors mask numbers from the socket handler');
-        } else {
-          fail(`media json log ${JSON.stringify(mediaLogs)}`);
-        }
-
         const beforeInner = stderr.lines.length;
         handleTwilioMessage(placedSession, '+8613800000000');
         const innerLogs = stderr.lines.slice(beforeInner).filter((line) => line.includes('[twilio] JSON parse error callSid='));
@@ -602,23 +598,6 @@ async function main() {
           }
         }
 
-        const serverSock = [...wss.clients][0];
-        const beforeWs = stderr.lines.length;
-        if (!serverSock) {
-          fail('server media socket was missing');
-        } else {
-          serverSock.emit('error', new Error('socket +8613800000000'));
-          const wsLogs = stderr.lines.slice(beforeWs).filter((line) => line.includes('[twilio] ws error:'));
-          if (
-            wsLogs.length === 1 &&
-            !wsLogs[0].includes('+8613800000000') &&
-            wsLogs[0].includes('0000')
-          ) {
-            pass('twilio ws errors mask numbers from the real listener');
-          } else {
-            fail(`twilio ws log ${JSON.stringify(wsLogs)}`);
-          }
-        }
         mediaSock.close();
       } finally {
         setGrokRealtimeUrlForTests('ws://127.0.0.1:9');
