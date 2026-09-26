@@ -28,8 +28,8 @@ All control-plane routes (`/call`, `/steer`, `/hangup`, `/voice`, `/transcript`)
 - Constant-time comparison uses `crypto.timingSafeEqual` to prevent timing attacks
 
 **Single-use claim:**
-- Signatures can only be claimed once; duplicate attempts return 409 Conflict
-- CallSid binding: expected CallSid is frozen at session creation; mismatches close the WebSocket immediately
+- Signatures can only be claimed once; a second start with the same signature is rejected and the socket is closed
+- CallSid binding: `start.callSid` must match the signed parameter; mismatches close the WebSocket
 - Signature DoS mitigation: unclaimed signatures are restored to pending with preserved TTL to prevent burn loops
 
 ### 3. Session Lifecycle Management
@@ -107,17 +107,18 @@ Use `.env` (gitignored) or secret management systems for deployments.
 
 **Within-TTL attacks (LOW-MEDIUM impact):**
 
-*Scenario 1: Stolen URL + forged `start.callSid`*
-- If an attacker captures the media stream URL (callSid + timestamp + signature from query string)
-- AND forges a Twilio Media Stream `start` event with matching `start.callSid` from the URL query
+*Scenario 1: Stolen TwiML parameters + forged start event*
+- The `<Stream url>` has no query string (Twilio error 31920). `callSid`, `timestamp`, and `signature` are `<Parameter>` values on the start message.
+- If an attacker captures those parameters and opens `/media-stream`
+- AND sends a `start` event whose `start.callSid` and `start.customParameters` match
 - The attacker can bind to the session within `MEDIA_AUTH_WINDOW_MS` (default 2 minutes)
 - **Impact:** Single connection to xAI Realtime for that specific CallSid
-- **Why this works:** WebSocket upgrade validates signature + CallSid from URL, but `start` event CallSid comes from Twilio's JSON payload (which attacker can forge if they have the URL)
 - **Mitigations:**
-  - Single-use claim (second connection → 409)
+  - Single-use claim (a second start with the same signature is rejected)
   - Short TTL (default 2 minutes)
   - Signature tied to specific CallSid (cannot transfer to other calls)
-  - DoS mitigation: burned signatures restored for legitimate connection if not yet bound
+  - Upgrade does not authenticate from the query string, so a query string cannot bypass the start-event check
+  - DoS mitigation: a claimed signature that closes before bind is restored for the legitimate start
 
 *Scenario 2: `/twiml-connect` sessionId leak*
 - If `sessionId` query parameter is leaked before Twilio fetches TwiML

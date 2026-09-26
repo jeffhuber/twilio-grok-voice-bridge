@@ -85,32 +85,30 @@ The `/media-stream` WebSocket endpoint uses **HMAC-SHA256 signature-based authen
 **How it works:**
 1. When `/call` is invoked, Twilio fetches TwiML from the `/twiml-connect` endpoint
 2. The bridge generates HMAC-SHA256 signature: `HMAC(BRIDGE_API_KEY, callSid:timestamp)`
-3. The signature, CallSid, and timestamp are embedded in the Media Stream URL: `wss://HOST/media-stream?callSid=...&timestamp=...&signature=...`
-4. These parameters are also passed as TwiML custom parameters for defense-in-depth verification
-5. On WebSocket upgrade, the bridge:
+3. The `<Stream url>` is the bare path `wss://HOST/media-stream` with no query string. Twilio error [31920](https://www.twilio.com/docs/api/errors/31920) rejects Stream URLs that include a query string.
+4. `callSid`, `timestamp`, and `signature` are `<Parameter>` values. Twilio delivers them on the start message as `start.customParameters` ([WebSocket messages](https://www.twilio.com/docs/voice/media-streams/websocket-messages)).
+5. The WebSocket upgrade accepts `/media-stream` without reading auth from the query string.
+6. On Twilio's `start` event the bridge:
+   - Reads `callSid`, `timestamp`, and `signature` only from `start.customParameters`
+   - Requires `start.callSid` to match that `callSid`
    - Verifies the HMAC signature using constant-time comparison
-   - Checks timestamp is within `MEDIA_AUTH_WINDOW_MS` (default 2 minutes)
-   - Checks signature hasn't been claimed before within this process instance (mitigates replay)
-   - Validates CallSid matches the pending session
-6. **Signature claim:** On upgrade, the signature is atomically moved from pending to claimed state. Second upgrade attempts with the same signature are rejected with 409 Conflict.
-7. On Twilio's `start` event, the bridge verifies:
-   - CallSid from Twilio matches the URL CallSid
-   - Custom parameters match URL parameters (prevents parameter injection)
-8. Only after HMAC verification + CallSid binding succeeds does the bridge open the xAI Realtime WebSocket
+   - Checks the timestamp is within `MEDIA_AUTH_WINDOW_MS` (default 2 minutes)
+   - Rejects a signature that was already claimed in this process, or that has no pending session
+7. Only after that verification binds the socket does the bridge open the xAI Realtime WebSocket
 
 **This mitigates:**
 - **Replay attacks:** Signatures are single-use within a process instance and time-limited (default 2 minutes)
 - **Token leakage:** Signatures are bound to a specific CallSid and timestamp
 - **Bearer token weakness:** HMAC signatures cannot be forged without knowing `BRIDGE_API_KEY`
 - **CallSid forgery:** Signature verification fails if CallSid is tampered with
-- **Parameter injection:** Custom parameters are cross-checked against URL parameters
-- **Signature burn DoS:** Claimed signatures that close before CallSid bind are restored to pending with preserved TTL
+- **Parameter injection:** `start.callSid` must match the signed `callSid` parameter. Goal, context, and voice are not taken from the start event.
+- **Signature burn DoS:** A claimed signature that closes before CallSid bind is restored to pending with its original TTL
 
 **Signature verification:**
 - HMAC-SHA256 signature over `callSid:timestamp` using `BRIDGE_API_KEY` as secret
 - Constant-time comparison prevents timing attacks
 - Timestamp must be within `MEDIA_AUTH_WINDOW_MS` (default 2 minutes)
-- Signatures are single-use (claimed atomically on upgrade)
+- Signatures are single-use (claimed when the start event is accepted; a second start with the same signature is rejected)
 - Old signatures invalidated on `/twiml-connect` retry (prevents multi-sig accumulation)
 
 **Security properties:**
