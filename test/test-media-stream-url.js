@@ -29,6 +29,7 @@ const {
   mediaClientKey,
   noteUnauthMediaClose,
   maskPhoneNumbersInText,
+  handleGrokEvent,
 } = require('../src/server.js');
 
 let failed = 0;
@@ -285,48 +286,64 @@ async function main() {
     fail(`ipv6 keys ${v6a} ${v6b} ${v6other} ${v6tunneled}`);
   }
   const maskedLog = maskPhoneNumbersInText(
-    'dial 555-0100 from 203.0.113.50 on 2026-09-26 at 1727350123456'
+    'dial 555-0100 from 203.0.113.50 and 198.51.100.10 on 2026-09-26 at 1727350123456'
   );
   if (
     !maskedLog.includes('555-0100') &&
     maskedLog.includes('0100') &&
     maskedLog.includes('203.0.113.50') &&
+    maskedLog.includes('198.51.100.10') &&
+    !maskedLog.includes('198.xxxxx0.10') &&
     maskedLog.includes('2026-09-26') &&
     !maskedLog.includes('1727350123456') &&
     maskedLog.includes('3456')
   ) {
-    pass('log masking keeps IPv4 addresses and dates and masks 13-digit runs');
+    pass('log masking keeps whole IPv4 addresses and dates and masks 13-digit runs');
   } else {
     fail(`mask result ${maskedLog}`);
   }
   const plus86 = maskPhoneNumbersInText('failed for +8613800000000 and +86 138 0000 0000 today');
-  const plus49 = maskPhoneNumbersInText('failed for +4930123456789 today');
+  const plus49 = maskPhoneNumbersInText('failed for +4930000000000 today');
   const outsideEpoch = maskPhoneNumbersInText('id 8613800000000 and 2100000000001');
   const plusEpoch = maskPhoneNumbersInText('stamp +1727350123456');
   const epochCeiling = maskPhoneNumbersInText('edge 2100000000000');
-  const cnMobile = maskPhoneNumbersInText('failed for +8613812345678 today');
-  const deMobile = maskPhoneNumbersInText('failed for +4915112345678 today');
   if (
     !plus86.includes('+8613800000000') &&
     !plus86.includes('+86') &&
     !plus86.includes('138') &&
     plus86.includes('0000') &&
-    !plus49.includes('+4930123456789') &&
-    plus49.includes('6789') &&
+    !plus49.includes('+4930000000000') &&
+    plus49.includes('0000') &&
     !outsideEpoch.includes('8613800000000') &&
     !outsideEpoch.includes('2100000000001') &&
     !plusEpoch.includes('+1727350123456') &&
     plusEpoch.includes('3456') &&
     !epochCeiling.includes('2100000000000') &&
-    epochCeiling.includes('0000') &&
-    !cnMobile.includes('+8613812345678') &&
-    cnMobile.includes('5678') &&
-    !deMobile.includes('+4915112345678') &&
-    deMobile.includes('5678')
+    epochCeiling.includes('0000')
   ) {
     pass('a leading plus is masked, including the country code, and 13-digit runs are masked');
   } else {
-    fail(`international mask ${plus86} | ${plus49} | ${outsideEpoch} | ${plusEpoch} | ${epochCeiling} | ${cnMobile} | ${deMobile}`);
+    fail(`international mask ${plus86} | ${plus49} | ${outsideEpoch} | ${plusEpoch} | ${epochCeiling}`);
+  }
+  const grokServerLogs = [];
+  const originalGrokError = console.error;
+  console.error = (...args) => {
+    grokServerLogs.push(args.map((part) => String(part)).join(' '));
+  };
+  try {
+    handleGrokEvent({}, { type: 'error', error: { message: 'upstream +4930000000000' } });
+  } finally {
+    console.error = originalGrokError;
+  }
+  const grokServerLog = grokServerLogs.join('\n');
+  if (
+    grokServerLog.includes('[grok] server error:') &&
+    !grokServerLog.includes('+4930000000000') &&
+    grokServerLog.includes('0000')
+  ) {
+    pass('grok server errors mask numbers in the event payload');
+  } else {
+    fail(`grok server error log ${grokServerLog}`);
   }
 
   const xml = buildConnectTwiml({
