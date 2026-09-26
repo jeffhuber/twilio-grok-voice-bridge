@@ -70,7 +70,18 @@ fi
 export PATH="${BRIDGE_HOME}/.local/bin:/usr/local/bin:/usr/bin:/bin:${PATH:-}"
 
 umask 077
+# Refuse a pre-created /tmp run dir that we do not own, and refuse a symlink.
+# Another user can create /tmp/twilio-bridge-<uid> before the first start.
+if [[ -L "${RUN_DIR}" ]]; then
+  echo "ERROR: ${RUN_DIR} is a symlink" >&2
+  exit 1
+fi
 mkdir -p "${RUN_DIR}" "${LOG_DIR}" "${STATE_DIR}"
+run_dir_owner="$(stat -c %u "${RUN_DIR}" 2>/dev/null || true)"
+if [[ -z "${run_dir_owner}" || "${run_dir_owner}" != "$(id -u)" ]]; then
+  echo "ERROR: ${RUN_DIR} is not owned by uid $(id -u)" >&2
+  exit 1
+fi
 chmod 700 "${RUN_DIR}" "${LOG_DIR}" "${STATE_DIR}"
 
 ts() { date -u +'%Y-%m-%dT%H:%M:%SZ'; }
@@ -374,7 +385,7 @@ wait_for_tunnel_auth() {
 }
 
 disabled_marker() { printf '%s/disabled' "${STATE_DIR}"; }
-skip_tunnel_marker() { printf '%s/skip-tunnel' "${RUN_DIR}"; }
+skip_tunnel_marker() { printf '%s/skip-tunnel' "${STATE_DIR}"; }
 
 mark_disabled() {
   mkdir -p "${STATE_DIR}"
@@ -388,6 +399,8 @@ clear_disabled() { rm -f "$(disabled_marker)"; }
 is_disabled() { [[ -f "$(disabled_marker)" ]]; }
 
 save_skip_tunnel() {
+  mkdir -p "${STATE_DIR}"
+  chmod 700 "${STATE_DIR}"
   if [[ "${SKIP_TUNNEL:-}" == "1" ]]; then
     printf '1\n' > "$(skip_tunnel_marker)"
     chmod 600 "$(skip_tunnel_marker)"

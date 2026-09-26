@@ -100,7 +100,7 @@ while true; do
         log "ERROR: cloudflared did not restart after the health check"
       fi
     else
-      log "leaving cloudflared stopped because http://127.0.0.1:${port}/health authRequired is not true"
+      log "leaving cloudflared stopped because http://127.0.0.1:${port}/health authRequired is not true; it stays down until start.sh or boot.sh"
     fi
   fi
 

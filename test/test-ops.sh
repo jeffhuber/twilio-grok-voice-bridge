@@ -112,6 +112,35 @@ if [[ "${xdg_ignored_dir}" != "/tmp/twilio-bridge-$(id -u)" ]]; then
 fi
 echo "ok run dir ignores XDG_RUNTIME_DIR"
 
+ln -sfn "${TMP}/run" "${TMP}/run-symlink"
+set +e
+symlink_log="$(
+  TWILIO_BRIDGE_RUN_DIR="${TMP}/run-symlink" \
+  TWILIO_BRIDGE_LOG_DIR="${TMP}/log" \
+  BRIDGE_HOME="${TMP}/home" \
+  bash -c 'source "$1"' bash "${ROOT}/ops/common.sh" 2>&1
+)"
+symlink_rc=$?
+set -e
+if [[ "${symlink_rc}" -eq 0 ]] || ! grep -q 'is a symlink' <<<"${symlink_log}"; then
+  fail "symlink run dir was accepted (rc=${symlink_rc})"
+fi
+echo "ok run dir symlink is refused"
+
+set +e
+owner_log="$(
+  TWILIO_BRIDGE_RUN_DIR="${TMP}/foreign-run" \
+  TWILIO_BRIDGE_LOG_DIR="${TMP}/log" \
+  BRIDGE_HOME="${TMP}/home" \
+  bash -c 'stat() { printf "0\n"; }; source "$1"' bash "${ROOT}/ops/common.sh" 2>&1
+)"
+owner_rc=$?
+set -e
+if [[ "${owner_rc}" -eq 0 ]] || ! grep -q 'not owned by uid' <<<"${owner_log}"; then
+  fail "foreign-owned run dir was accepted (rc=${owner_rc})"
+fi
+echo "ok run dir ownership is checked"
+
 BRIDGE_DIR=""
 # shellcheck disable=SC1091
 source "${TMP}/linkdir/common.sh"
@@ -558,10 +587,19 @@ fi
 echo "ok start clears stop marker"
 
 SKIP_TUNNEL=1 save_skip_tunnel
+if [[ "$(skip_tunnel_marker)" != "${BRIDGE_HOME}/var/lib/twilio-bridge/skip-tunnel" ]]; then
+  fail "skip-tunnel marker is not under BRIDGE_HOME: $(skip_tunnel_marker)"
+fi
+if [[ "$(skip_tunnel_marker)" == "${RUN_DIR}/"* ]]; then
+  fail "skip-tunnel marker is inside the run directory"
+fi
+rm -rf "${RUN_DIR}"
+mkdir -p "${RUN_DIR}"
+chmod 700 "${RUN_DIR}"
 unset SKIP_TUNNEL
 load_skip_tunnel
 if [[ "${SKIP_TUNNEL:-}" != "1" ]]; then
-  fail "load_skip_tunnel did not restore the saved choice"
+  fail "load_skip_tunnel did not restore the saved choice after the run directory was removed"
 fi
 unset SKIP_TUNNEL
 set +e
