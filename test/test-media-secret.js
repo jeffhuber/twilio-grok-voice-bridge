@@ -6,6 +6,8 @@ delete process.env.MEDIA_STREAM_SECRET;
 
 const crypto = require('crypto');
 const http = require('http');
+const path = require('path');
+const { spawnSync } = require('child_process');
 const {
   app,
   generateMediaAuthSignature,
@@ -128,6 +130,45 @@ async function main() {
   const missing = verifyMediaAuthSignature(callSid, timestamp, fallback);
   if (!missing.valid) pass('verify fails when both secrets are empty');
   else fail('verify should fail when both secrets are empty');
+
+  function startupText(mediaSecret) {
+    const result = spawnSync(
+      process.execPath,
+      ['-e', 'require("./src/server.js"); setTimeout(() => process.exit(0), 30);'],
+      {
+        cwd: path.join(__dirname, '..'),
+        env: Object.assign({}, process.env, {
+          BRIDGE_API_KEY: 'operator-test-key-padding-0123456789',
+          MEDIA_STREAM_SECRET: mediaSecret,
+        }),
+        encoding: 'utf8',
+        timeout: 5000,
+      }
+    );
+    return `${result.stdout || ''}\n${result.stderr || ''}`;
+  }
+
+  const shortSecret = 'a'.repeat(31);
+  const shortOut = startupText(shortSecret);
+  if (shortOut.includes('shorter than 32 bytes') && !shortOut.includes(shortSecret)) {
+    pass('MEDIA_STREAM_SECRET under 32 bytes warns and is not printed');
+  } else {
+    fail('short MEDIA_STREAM_SECRET did not warn, or the warning included the secret');
+  }
+
+  const longOut = startupText('b'.repeat(32));
+  if (!longOut.includes('shorter than 32 bytes')) {
+    pass('32-byte MEDIA_STREAM_SECRET does not warn');
+  } else {
+    fail('32-byte MEDIA_STREAM_SECRET warned');
+  }
+
+  const blankOut = startupText('   ');
+  if (!blankOut.includes('shorter than 32 bytes')) {
+    pass('blank MEDIA_STREAM_SECRET does not warn as a short dedicated key');
+  } else {
+    fail('blank MEDIA_STREAM_SECRET warned');
+  }
 
   if (failed > 0) {
     console.error(`\n${failed} media secret test(s) failed`);

@@ -301,6 +301,13 @@ function mediaAuthUsesDedicatedSecret() {
   return Boolean(String(process.env.MEDIA_STREAM_SECRET || '').trim());
 }
 
+{
+  const dedicated = String(process.env.MEDIA_STREAM_SECRET || '').trim();
+  if (dedicated && Buffer.byteLength(dedicated, 'utf8') < 32) {
+    console.warn('[warn] MEDIA_STREAM_SECRET is shorter than 32 bytes. Use a longer random value for media HMAC.');
+  }
+}
+
 if (!BRIDGE_API_KEY && !ALLOW_UNAUTHENTICATED_OPERATOR) {
   console.error('[error] BRIDGE_API_KEY is not set and ALLOW_UNAUTHENTICATED_OPERATOR is not enabled.');
   console.error('[error] For shared/public deployments, BRIDGE_API_KEY is required to protect operator routes.');

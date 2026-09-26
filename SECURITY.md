@@ -19,9 +19,9 @@ All control-plane routes (`/call`, `/steer`, `/hangup`, `/voice`, `/transcript`)
 ### 2. Media Stream WebSocket Security
 
 **HMAC-SHA256 signature authentication:**
-- Cryptographically signed authentication using `BRIDGE_API_KEY` as secret
+- Cryptographically signed authentication. The HMAC key is `MEDIA_STREAM_SECRET` when that value is non-empty after trimming, otherwise `BRIDGE_API_KEY`
 - Signatures computed over `callSid:timestamp`, preventing forgery
-- Unforgeable: requires knowledge of `BRIDGE_API_KEY` to generate valid signatures
+- Unforgeable: requires knowledge of that HMAC key to generate valid signatures
 - Signature generated at `/twiml-connect` when Twilio fetches TwiML
 - CallSid cryptographically bound into MAC
 - Time-limited: signatures expire after `MEDIA_AUTH_WINDOW_MS` (default 2 minutes)
@@ -67,6 +67,7 @@ Sensitive environment variables should never be committed:
 - `TWILIO_AUTH_TOKEN`
 - `XAI_API_KEY`
 - `BRIDGE_API_KEY`
+- `MEDIA_STREAM_SECRET` (media HMAC key when non-empty after trimming; otherwise HMAC uses `BRIDGE_API_KEY`)
 
 Use `.env` (gitignored) or secret management systems for deployments.
 
@@ -129,12 +130,12 @@ Use `.env` (gitignored) or secret management systems for deployments.
   - Old signatures invalidated on retry
   
 **Operator route compromise:**
-- If `BRIDGE_API_KEY` is compromised, an attacker can:
-  - Place calls via `/call` endpoint (spending Twilio account)
-  - Generate valid HMAC signatures for media streams
+- If `BRIDGE_API_KEY` is compromised, an attacker can place calls via `/call` (spending the Twilio account) and can mint media HMAC signatures when `MEDIA_STREAM_SECRET` is empty
+- If the media HMAC key is compromised (`MEDIA_STREAM_SECRET` when that value is non-empty after trimming, otherwise `BRIDGE_API_KEY`), an attacker can generate valid media signatures
 - **Mitigations:**
-  - Rotate `BRIDGE_API_KEY` immediately if compromised
-  - Use strong random keys (32+ bytes)
+  - Rotate the compromised key immediately. Rotating the HMAC key is a hard cut: signatures already issued fail verification
+  - Set `MEDIA_STREAM_SECRET` so media HMAC can rotate without rotating the operator key
+  - Use strong random keys (32+ bytes). A shorter `MEDIA_STREAM_SECRET` logs a startup warning and is still accepted
   - Monitor Twilio billing for unexpected usage
   - Add additional controls: IP allowlists, Cloudflare Access, etc.
 
@@ -163,14 +164,14 @@ Use `.env` (gitignored) or secret management systems for deployments.
 ### Security Properties
 
 The HMAC-based authentication provides:
-- ✅ **Unforgeability:** Signatures cannot be generated without `BRIDGE_API_KEY`
+- ✅ **Unforgeability:** Signatures cannot be generated without the HMAC key (`MEDIA_STREAM_SECRET` when non-empty after trimming, otherwise `BRIDGE_API_KEY`)
 - ✅ **Cryptographic binding:** CallSid is bound into the signature; tampering invalidates it
 - ✅ **Time-limited:** Signatures expire after `MEDIA_AUTH_WINDOW_MS` (default 2 minutes)
 - ✅ **Single-use:** Signatures can only be claimed once
 - ✅ **X-Twilio-Signature validation:** `/twiml-connect` protected when `TWILIO_AUTH_TOKEN` is set
 
 **Deployment requirements:**
-- Requires `BRIDGE_API_KEY` to be set for signature generation
+- Requires an HMAC key for signature generation: `MEDIA_STREAM_SECRET`, or `BRIDGE_API_KEY` when that dedicated value is empty
 - Sticky/single-node deployment required (in-memory state)
 - HTTPS/WSS required for Twilio Media Streams
 
@@ -180,7 +181,7 @@ The HMAC-based authentication provides:
 - Rate limiting is not implemented; add rate limiting at the reverse proxy level
 - DDoS protection should be handled by your edge (Cloudflare, AWS Shield, etc.)
 - No intrusion detection; monitor logs for anomalies
-- `BRIDGE_API_KEY` serves dual purposes (HTTP auth + HMAC signing); consider separate keys for defense in depth
+- When `MEDIA_STREAM_SECRET` is empty, `BRIDGE_API_KEY` serves both HTTP auth and HMAC signing. Set a separate `MEDIA_STREAM_SECRET` (32+ bytes) so those keys can rotate independently
 
 ## Audit History
 
