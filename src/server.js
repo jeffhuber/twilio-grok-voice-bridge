@@ -727,7 +727,7 @@ function buildInstructions(goal, context, style) {
   ].join('\n');
 }
 
-function createSession({ callSid, goal, context, voice, style, to, softContinue }) {
+function createSession({ callSid, goal, context, voice, style, to, softContinue, openerOnConnect }) {
   const resolvedStyle = resolveStyle({ style });
   const soft = Boolean(softContinue);
   /** @type {CallSession} */
@@ -739,6 +739,9 @@ function createSession({ callSid, goal, context, voice, style, to, softContinue 
     style: resolvedStyle,
     to: to || '',
     softContinue: soft,
+    openerOnConnect: typeof openerOnConnect === 'boolean' ? openerOnConnect : undefined,
+    openerSent: false,
+    awaitingAudioConfigAck: false,
     twilioWs: null,
     grokWs: null,
     transcript: [],
@@ -1026,6 +1029,56 @@ function buildSessionUpdate(session) {
   };
 }
 
+function connectOpenerEnabled(session) {
+  if (session && session.openerOnConnect === false) return false;
+  if (session && session.openerOnConnect === true) return true;
+  // Same exactly-'1' rule as the other flags. Unset greets. Only 1 disables.
+  return process.env.DISABLE_OPENER_ON_CONNECT !== '1';
+}
+
+function outputFormatIsPcmu(event) {
+  const format = event && event.session && event.session.audio && event.session.audio.output && event.session.audio.output.format;
+  return Boolean(format && format.type === 'audio/pcmu');
+}
+
+function calleeAlreadySpoke(session) {
+  return Array.isArray(session.transcript) && session.transcript.some((line) => line && line.role === 'them');
+}
+
+function markInitialAudioConfigSent(session) {
+  if (!session.openerSent) session.awaitingAudioConfigAck = true;
+}
+
+/**
+ * The first session.updated clears the greeting arm whether or not it confirms pcmu.
+ * Greet only when that same ack reports audio/pcmu output. Later updates do not greet.
+ * @param {CallSession} session
+ * @param {(session: CallSession, obj: object) => void} [send]
+ * @returns {boolean}
+ */
+function maybeSendConnectOpener(session, send, event) {
+  if (!session.awaitingAudioConfigAck || session.openerSent) return false;
+  session.awaitingAudioConfigAck = false;
+  session.openerSent = true;
+  if (!outputFormatIsPcmu(event)) return false;
+  if (!connectOpenerEnabled(session)) return false;
+  if (session.userSpeaking || calleeAlreadySpoke(session)) return false;
+  const emit = send || sendGrok;
+  emit(session, { type: 'response.create' });
+  return true;
+}
+
+function onGrokSocketOpen(session, send) {
+  const emit = send || sendGrok;
+  markInitialAudioConfigSent(session);
+  try {
+    emit(session, buildSessionUpdate(session));
+  } catch (err) {
+    session.awaitingAudioConfigAck = false;
+    throw err;
+  }
+}
+
 function openGrokSession(session) {
   if (!XAI_API_KEY) {
     console.error('[grok] XAI_API_KEY not set');
@@ -1047,7 +1100,7 @@ function openGrokSession(session) {
 
   grokWs.on('open', () => {
     console.log(`[grok] open callSid=${session.callSid}`);
-    sendGrok(session, buildSessionUpdate(session));
+    onGrokSocketOpen(session);
   });
 
   grokWs.on('message', (data, isBinary) => {
@@ -1088,13 +1141,18 @@ function openGrokSession(session) {
   });
 }
 
-function handleGrokEvent(session, event) {
+function handleGrokEvent(session, event, deps) {
   const type = event.type || '';
+  const send = (deps && deps.sendGrok) || sendGrok;
 
   switch (type) {
     case 'session.created':
+      console.log(`[grok] ${type}`);
+      break;
+
     case 'session.updated':
       console.log(`[grok] ${type}`);
+      maybeSendConnectOpener(session, send, event);
       break;
 
     case 'response.output_audio.delta':
@@ -1215,6 +1273,7 @@ function handleGrokEvent(session, event) {
 
     case 'error':
       console.error('[grok] server error:', maskPhoneNumbersInText(JSON.stringify(event.error || event)));
+      session.awaitingAudioConfigAck = false;
       break;
 
     default:
@@ -1646,9 +1705,12 @@ app.all('/twiml-connect', (req, res) => {
 app.post('/call', requireBridgeAuth, async (req, res) => {
   let tempId = null;
   try {
-    const { to, goal, context, voice, style, softContinue } = req.body || {};
+    const { to, goal, context, voice, style, softContinue, openerOnConnect } = req.body || {};
     if (!to || !goal) {
       return res.status(400).json({ error: 'to and goal are required' });
+    }
+    if (openerOnConnect !== undefined && typeof openerOnConnect !== 'boolean') {
+      return res.status(400).json({ error: 'openerOnConnect must be a boolean when provided' });
     }
     if (!isE164(to)) {
       return res.status(400).json({ error: 'to must be an E.164 number' });
@@ -1663,6 +1725,7 @@ app.post('/call', requireBridgeAuth, async (req, res) => {
     const resolvedVoice = resolveVoiceId(voice || XAI_VOICE);
     const resolvedStyle = resolveStyle({ style });
     const wantSoft = Boolean(softContinue);
+    const openerFlag = typeof openerOnConnect === 'boolean' ? openerOnConnect : undefined;
     
     if (!PUBLIC_HOST) {
       return res.status(500).json({ error: 'PUBLIC_HOST not set' });
@@ -1678,6 +1741,7 @@ app.post('/call', requireBridgeAuth, async (req, res) => {
       style: resolvedStyle,
       to,
       softContinue: wantSoft,
+      openerOnConnect: openerFlag,
     });
     pendingByCallSid.set(tempId, session);
     
@@ -2270,5 +2334,7 @@ module.exports = {
   sessionsByCallSid,
   handleTwilioMessage,
   handleGrokEvent,
+  onGrokSocketOpen,
+  connectOpenerEnabled,
   wss,
 };
