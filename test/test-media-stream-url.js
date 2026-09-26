@@ -298,6 +298,28 @@ async function main() {
   } else {
     fail(`mask result ${maskedLog}`);
   }
+  const plus86 = maskPhoneNumbersInText('failed for +8613800000000 and +86 138 0000 0000 today');
+  const plus49 = maskPhoneNumbersInText('failed for +4930123456789 today');
+  const outsideEpoch = maskPhoneNumbersInText('id 8613800000000 and 2100000000001');
+  const plusEpoch = maskPhoneNumbersInText('stamp +1727350123456');
+  const epochCeiling = maskPhoneNumbersInText('edge 2100000000000');
+  if (
+    !plus86.includes('+8613800000000') &&
+    !plus86.includes('+86') &&
+    !plus86.includes('138') &&
+    plus86.includes('0000') &&
+    !plus49.includes('+4930123456789') &&
+    plus49.includes('6789') &&
+    !outsideEpoch.includes('8613800000000') &&
+    !outsideEpoch.includes('2100000000001') &&
+    !plusEpoch.includes('+1727350123456') &&
+    plusEpoch.includes('3456') &&
+    epochCeiling.includes('2100000000000')
+  ) {
+    pass('a leading plus is masked, including the country code, and only in-range epoch values stay');
+  } else {
+    fail(`international mask ${plus86} | ${plus49} | ${outsideEpoch} | ${plusEpoch} | ${epochCeiling}`);
+  }
 
   const xml = buildConnectTwiml({
     goal: 'Confirm a reservation',
@@ -634,6 +656,86 @@ async function main() {
     for (const sock of signedPool) sock.close();
     otherPrefixSock.close();
     ninth.close();
+    await delay(150);
+
+    const victim = await connect(port, {
+      'CF-Connecting-IP': '2001:db8:81:1::1',
+      'X-Twilio-Signature': twilioSignature,
+    });
+    held.push(victim);
+    const signedSameClient = [];
+    for (let i = 1; i <= MAX_AWAITING_SIGNED_MEDIA_SOCKETS_PER_CLIENT; i += 1) {
+      const sock = await connect(port, {
+        'CF-Connecting-IP': `2001:db8:81:2::${i}`,
+        'X-Twilio-Signature': twilioSignature,
+      });
+      signedSameClient.push(sock);
+      held.push(sock);
+    }
+    const sameOldestWait = waitClose(signedSameClient[0], 2000, 'same-client signed eviction');
+    const sameNinth = await connect(port, {
+      'CF-Connecting-IP': '2001:db8:81:2::ff',
+      'X-Twilio-Signature': twilioSignature,
+    });
+    held.push(sameNinth);
+    const sameOldestCode = await sameOldestWait;
+    if (
+      sameOldestCode === 1008 &&
+      victim.readyState === WebSocket.OPEN &&
+      sameNinth.readyState === WebSocket.OPEN &&
+      signedSameClient.slice(1).every((sock) => sock.readyState === WebSocket.OPEN)
+    ) {
+      pass('a full signed per-client cap evicts only that client oldest unbound socket');
+    } else if (sameOldestCode !== null) {
+      fail(
+        `same-client eviction code=${sameOldestCode} victim=${victim.readyState} ninth=${sameNinth.readyState}`
+      );
+    }
+    victim.close();
+    for (const sock of signedSameClient) sock.close();
+    sameNinth.close();
+    await delay(150);
+
+    const signedGlobalCap = 128;
+    const signedGlobal = [];
+    for (let start = 0; start < signedGlobalCap; start += 32) {
+      const group = [];
+      for (let i = start; i < start + 32; i += 1) {
+        group.push(
+          connect(port, {
+            'CF-Connecting-IP': `2001:db8:90:${i + 1}::1`,
+            'X-Twilio-Signature': twilioSignature,
+          })
+        );
+      }
+      const opened = await Promise.all(group);
+      for (const sock of opened) {
+        signedGlobal.push(sock);
+        held.push(sock);
+      }
+    }
+    const oldestGlobalWait = waitClose(signedGlobal[0], 2000, 'signed global oldest');
+    const overflow = await connect(port, {
+      'CF-Connecting-IP': '2001:db8:91:1::1',
+      'X-Twilio-Signature': twilioSignature,
+    });
+    held.push(overflow);
+    const oldestGlobalCode = await oldestGlobalWait;
+    const globalRestOpen = signedGlobal.slice(1).every((sock) => sock.readyState === WebSocket.OPEN);
+    if (oldestGlobalCode === 1008 && overflow.readyState === WebSocket.OPEN && globalRestOpen) {
+      pass('129 signed sockets across distinct clients evict the oldest unbound signed socket');
+    } else if (oldestGlobalCode !== null) {
+      fail(`signed global code=${oldestGlobalCode} overflow=${overflow.readyState} rest=${globalRestOpen}`);
+    }
+    for (const sock of signedGlobal) {
+      try {
+        sock.close();
+      } catch {
+        /* ignore */
+      }
+    }
+    overflow.close();
+    await delay(150);
 
     const rawIp = '198.51.100.40';
     const rawStarted = Date.now();
