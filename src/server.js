@@ -78,9 +78,9 @@ function calendarParts(year, month, day) {
 
 /**
  * Mask digit runs of 7 or more. Separators may appear inside the run.
- * A letter or digit on either side keeps the text. IPv4 addresses and calendar
- * dates are left alone. There is no epoch-millisecond exemption, so a 13-digit
- * run is masked, including a run that starts with +.
+ * A letter or digit on either side keeps the text. A whole IPv4 address or
+ * calendar date is copied through. There is no epoch-millisecond exemption,
+ * so a 13-digit run is masked, including a run that starts with +.
  */
 function maskPhoneNumbersInText(text) {
   const s = String(text == null ? '' : text).replace(/[\r\n]/g, ' ');
@@ -115,8 +115,12 @@ function maskPhoneNumbersInText(text) {
     }
     const slice = lastDigit >= i ? s.slice(i, lastDigit + 1) : '';
     const after = s[lastDigit + 1] || '';
-    const keep = !slice || isIpv4(slice) || isCalendarDate(slice);
-    if (digits >= 7 && lastDigit >= i && !isWordChar(after) && !keep) {
+    if (slice && (isIpv4(slice) || isCalendarDate(slice))) {
+      out += slice;
+      i = lastDigit + 1;
+      continue;
+    }
+    if (digits >= 7 && lastDigit >= i && !isWordChar(after)) {
       out += maskPhoneNumber(slice);
       i = lastDigit + 1;
       continue;
@@ -1150,7 +1154,7 @@ function handleGrokEvent(session, event) {
     }
 
     case 'error':
-      console.error('[grok] server error:', JSON.stringify(event.error || event));
+      console.error('[grok] server error:', maskPhoneNumbersInText(JSON.stringify(event.error || event)));
       break;
 
     default:
@@ -2188,4 +2192,5 @@ module.exports = {
   mediaClientKey,
   noteUnauthMediaClose,
   maskPhoneNumbersInText,
+  handleGrokEvent,
 };
