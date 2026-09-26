@@ -138,20 +138,30 @@ async function main() {
   }
 
   handleGrokEvent(session, { type: 'session.updated' }, { sendGrok: send });
-  if (responseCreates(sent).length === 0 && session.awaitingAudioConfigAck === true && session.openerSent === false) {
-    pass('session.updated without pcmu output leaves the arm set');
+  if (responseCreates(sent).length === 0 && session.awaitingAudioConfigAck === false && session.openerSent === true) {
+    pass('the first session.updated clears the arm even without pcmu output');
   } else {
-    fail('non-pcmu session.updated consumed the opener arm');
+    fail('non-pcmu session.updated left the opener arm set');
+  }
+  handleGrokEvent(session, pcmuAck(), { sendGrok: send });
+  if (responseCreates(sent).length === 0) {
+    pass('a later pcmu ack does not greet after a non-pcmu session.updated');
+  } else {
+    fail('a later pcmu ack greeted after the arm was cleared');
   }
 
-  handleGrokEvent(session, pcmuAck(), { sendGrok: send });
-  handleGrokEvent(session, pcmuAck(), { sendGrok: send });
-  onGrokSocketOpen(session, send);
-  handleGrokEvent(session, pcmuAck(), { sendGrok: send });
-  if (responseCreates(sent).length === 1 && responseCreates(sent)[0].type === 'response.create') {
+  const greeted = freshSession({ callSid: 'call-greet' });
+  const greetSent = [];
+  const greetSend = (_session, obj) => greetSent.push(obj);
+  onGrokSocketOpen(greeted, greetSend);
+  handleGrokEvent(greeted, pcmuAck(), { sendGrok: greetSend });
+  handleGrokEvent(greeted, pcmuAck(), { sendGrok: greetSend });
+  onGrokSocketOpen(greeted, greetSend);
+  handleGrokEvent(greeted, pcmuAck(), { sendGrok: greetSend });
+  if (responseCreates(greetSent).length === 1 && responseCreates(greetSent)[0].type === 'response.create') {
     pass('first pcmu session.updated greets once and later updates do not');
   } else {
-    fail(`expected one response.create, saw ${responseCreates(sent).length}`);
+    fail(`expected one response.create, saw ${responseCreates(greetSent).length}`);
   }
 
   const optedOut = freshSession({ callSid: 'call-2', openerOnConnect: false });

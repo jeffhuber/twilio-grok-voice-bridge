@@ -897,17 +897,17 @@ function markInitialAudioConfigSent(session) {
 }
 
 /**
- * One greeting after the initial audio format has been acknowledged.
- * Later session.updated events (voice, VAD, steer) must not greet again.
+ * The first session.updated clears the greeting arm whether or not it confirms pcmu.
+ * Greet only when that same ack reports audio/pcmu output. Later updates do not greet.
  * @param {CallSession} session
  * @param {(session: CallSession, obj: object) => void} [send]
  * @returns {boolean}
  */
 function maybeSendConnectOpener(session, send, event) {
   if (!session.awaitingAudioConfigAck || session.openerSent) return false;
-  if (!outputFormatIsPcmu(event)) return false;
   session.awaitingAudioConfigAck = false;
   session.openerSent = true;
+  if (!outputFormatIsPcmu(event)) return false;
   if (!connectOpenerEnabled(session)) return false;
   if (session.userSpeaking || calleeAlreadySpoke(session)) return false;
   const emit = send || sendGrok;
