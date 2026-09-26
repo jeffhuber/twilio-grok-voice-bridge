@@ -4,6 +4,7 @@
 const http = require('http');
 
 process.env.BRIDGE_API_KEY = process.env.BRIDGE_API_KEY || 'operator-test-key';
+const OPERATOR_KEY = process.env.BRIDGE_API_KEY;
 delete process.env.DISABLE_OPENER_ON_CONNECT;
 delete process.env.OPENER_ON_CONNECT;
 delete process.env.XAI_API_KEY;
@@ -77,7 +78,7 @@ function postCall(port, body) {
         headers: {
           'Content-Type': 'application/json',
           'Content-Length': Buffer.byteLength(payload),
-          Authorization: 'Bearer operator-test-key',
+          Authorization: `Bearer ${OPERATOR_KEY}`,
         },
       },
       (res) => {
@@ -276,8 +277,8 @@ async function main() {
       const is400 = result.status === 400 && result.json && result.json.error === 'openerOnConnect must be a boolean when provided';
       if (item.expect400 && is400) {
         pass(`POST /call openerOnConnect ${item.label} is 400`);
-      } else if (!item.expect400 && result.status !== 400) {
-        pass(`POST /call openerOnConnect ${item.label} is not a boolean 400`);
+      } else if (!item.expect400 && result.status === 500 && result.json && result.json.error === 'Twilio client not configured') {
+        pass(`POST /call openerOnConnect ${item.label} passes the boolean check`);
       } else {
         fail(`POST /call openerOnConnect ${item.label} status=${result.status} body=${JSON.stringify(result.json)}`);
       }
