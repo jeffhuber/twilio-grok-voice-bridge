@@ -51,6 +51,21 @@ interruptible_sleep() {
 while true; do
   rotate_log "${CHILD_LOG}"
   rotate_log "${SUP_LOG}"
+  if [[ "${NAME}" == "tunnel" ]]; then
+    port="$(bridge_port)"
+    if ! bridge_accepts_tunnel "${port}"; then
+      log "not restarting cloudflared; http://127.0.0.1:${port}/health authRequired is not true"
+      printf '[%s] tunnel restart withheld; authRequired is not true\n' "$(ts)" >> "${SUP_LOG}"
+      interruptible_sleep "${backoff}"
+      if (( backoff < max_backoff )); then
+        backoff=$(( backoff * 2 ))
+        if (( backoff > max_backoff )); then
+          backoff=${max_backoff}
+        fi
+      fi
+      continue
+    fi
+  fi
   printf '[%s] launching child\n' "$(ts)" >> "${SUP_LOG}"
   started_at=$(date +%s)
   set +e

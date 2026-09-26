@@ -15,17 +15,9 @@ stop_one() {
 require_proc
 stop_one tunnel
 stop_one bridge
+mark_disabled
 
-if [[ "${SKIP_TUNNEL:-}" != "1" ]]; then
-  pattern="$(regex_escape "cloudflared tunnel --config ${CLOUDFLARED_CONFIG} run ${TUNNEL_NAME}")"
-  pkill -f -- "${pattern}" 2>/dev/null || true
-fi
-
-while read -r pid; do
-  [[ -z "${pid}" ]] && continue
-  if bridge_process_matches "${pid}"; then
-    stop_pid "${pid}" "orphan-bridge" 5
-  fi
-done < <(pgrep -f -- "$(regex_escape "${BRIDGE_ENTRY}")" 2>/dev/null || true)
+stop_matching_processes cloudflared_process_matches "cloudflared"
+stop_matching_processes bridge_process_matches "orphan-bridge"
 
 "${OPS_DIR}/status.sh" || true

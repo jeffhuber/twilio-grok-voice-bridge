@@ -5,6 +5,8 @@ OPS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=common.sh
 source "${OPS_DIR}/common.sh"
 
+load_skip_tunnel
+
 status_one() {
   local name="$1"
   local sup child s c
@@ -31,6 +33,11 @@ echo "BRIDGE_DIR=${BRIDGE_DIR}"
 echo "RUN_DIR=${RUN_DIR}"
 echo "LOG_DIR=${LOG_DIR}"
 echo "PORT=${port}"
+if is_disabled; then
+  echo "disabled = yes (boot.sh will not start until start.sh)"
+else
+  echo "disabled = no"
+fi
 status_one bridge
 if [[ "${SKIP_TUNNEL:-}" == "1" ]]; then
   echo "tunnel   skipped (SKIP_TUNNEL=1)"

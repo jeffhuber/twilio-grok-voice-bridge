@@ -6,6 +6,15 @@ OPS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=common.sh
 source "${OPS_DIR}/common.sh"
 
+load_skip_tunnel
+if [[ "${SKIP_TUNNEL:-}" == "1" ]]; then
+  export SKIP_TUNNEL=1
+fi
+
+if is_disabled; then
+  exit 0
+fi
+
 all_up() {
   pid_is_ours "${RUN_DIR}/bridge.supervisor.pid" || return 1
   pid_is_ours "${RUN_DIR}/bridge.pid" || return 1

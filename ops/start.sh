@@ -39,7 +39,7 @@ reclaim_bridge_port() {
     return 0
   fi
   require_ss
-  holders="$(ss -tlnp 2>/dev/null | grep -E ":${port}([^0-9]|$)" || true)"
+  holders="$(ss -tlnH "sport = :${port}" 2>/dev/null || true)"
   if [[ -z "${holders}" ]]; then
     return 0
   fi
@@ -47,17 +47,15 @@ reclaim_bridge_port() {
   if [[ -n "${our_child}" ]] && pid_alive "${our_child}" && ! pid_is_ours "${RUN_DIR}/bridge.pid"; then
     log "bridge pidfile pid=${our_child} failed identity check; not signaling it"
   fi
-  while read -r pid; do
-    [[ -z "${pid}" ]] && continue
-    if bridge_process_matches "${pid}"; then
-      stop_pid "${pid}" "foreign-bridge" 5
-    fi
-  done < <(pgrep -f -- "$(regex_escape "${BRIDGE_ENTRY}")" 2>/dev/null || true)
+  stop_matching_processes bridge_process_matches "foreign-bridge"
   sleep 0.5
 }
 
-if [[ ! -f "${BRIDGE_ENV_FILE}" ]]; then
-  log "ERROR: missing ${BRIDGE_ENV_FILE}"
+clear_disabled
+save_skip_tunnel
+
+if [[ ! -f "${BRIDGE_DIR}/.env" && ! -f "${BRIDGE_ENV_FILE}" ]]; then
+  log "ERROR: missing ${BRIDGE_DIR}/.env (node loads this file; BRIDGE_ENV_FILE is only the port probe)"
   exit 1
 fi
 if [[ -z "${NODE_BIN}" || ! -x "${NODE_BIN}" ]]; then
@@ -65,36 +63,32 @@ if [[ -z "${NODE_BIN}" || ! -x "${NODE_BIN}" ]]; then
   exit 1
 fi
 
+require_flock
+exec 8>"${RUN_DIR}/start.lock"
+if ! flock -w 30 8; then
+  log "ERROR: timed out waiting for the start lock"
+  exit 1
+fi
+
 port="$(bridge_port)"
 
 if [[ "${SKIP_TUNNEL:-}" == "1" ]]; then
   log "SKIP_TUNNEL=1; not starting cloudflared"
-else
-  refuse_tunnel_if_unsafe
-  if [[ ! -e "${CLOUDFLARED_BIN}" ]]; then
-    log "ERROR: cloudflared not found at ${CLOUDFLARED_BIN}"
-    exit 1
-  fi
-  if [[ ! -f "${CLOUDFLARED_CONFIG}" ]]; then
-    log "ERROR: missing cloudflared config ${CLOUDFLARED_CONFIG}"
-    exit 1
-  fi
+elif [[ ! -e "${CLOUDFLARED_BIN}" ]]; then
+  log "ERROR: cloudflared not found at ${CLOUDFLARED_BIN}"
+  exit 1
+elif [[ ! -f "${CLOUDFLARED_CONFIG}" ]]; then
+  log "ERROR: missing cloudflared config ${CLOUDFLARED_CONFIG}"
+  exit 1
 fi
 
 reclaim_bridge_port "${port}"
 start_one bridge "${NODE_BIN}" "${BRIDGE_ENTRY}"
+wait_for_port "${port}"
 
 if [[ "${SKIP_TUNNEL:-}" != "1" ]]; then
+  wait_for_tunnel_auth "${port}"
   start_one tunnel "${CLOUDFLARED_BIN}" tunnel --config "${CLOUDFLARED_CONFIG}" run "${TUNNEL_NAME}"
 fi
-
-attempt=0
-while (( attempt < 10 )); do
-  if port_listening "${port}"; then
-    break
-  fi
-  attempt=$((attempt + 1))
-  sleep 0.5
-done
 
 "${OPS_DIR}/status.sh" || true

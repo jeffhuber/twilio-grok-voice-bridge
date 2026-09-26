@@ -5,13 +5,17 @@ Supervisor scripts for `node src/server.js` and a named Cloudflare tunnel (`TUNN
 1. A guarded `${HOME}/.profile` hook that runs `ops/boot.sh` for login shells.
 2. `crontab` `@reboot` when cron is installed. Without cron, that path does nothing.
 
-`boot.sh` stays quiet when the required supervisors and children already match their pidfiles. It logs only when it starts something.
+`boot.sh` stays quiet when the required supervisors and children already match their pidfiles. It logs only when it starts something. It does nothing while a stop marker is present (see below).
 
 ## Process identity
 
-Pidfiles live under `XDG_RUNTIME_DIR` when that directory is set, otherwise under `/tmp/twilio-bridge-<uid>`. Both locations are cleared across a machine restart more reliably than a directory under the home directory. Each pidfile is paired with a start-time record from `/proc/<pid>/stat`. `stop.sh` and `boot.sh` signal a pid only when that start time still matches, so a recycled pid is not killed.
+Pidfiles live in one directory for both cron and login: `/tmp/twilio-bridge-<uid>`, or `TWILIO_BRIDGE_RUN_DIR` when that is set. `XDG_RUNTIME_DIR` is not used, because it is often set in a login session and unset in cron.
 
-`/proc`, `flock`, and `ss` are required. If any of them is missing, the scripts exit with an error instead of treating the host as healthy.
+Each pidfile is paired with a record of the process start time from `/proc/<pid>/stat` and a boot id (`/proc/sys/kernel/random/boot_id`, or `btime` from `/proc/stat` when the boot id file is missing). `stop.sh` and `boot.sh` signal a pid only when both still match, so a recycled pid is not killed.
+
+`/proc`, `flock`, `ss`, and `curl` are required. If any of them is missing, the scripts exit with an error instead of treating the host as healthy. `ss` checks listeners with `ss -tlnH "sport = :<port>"`.
+
+Stopping the bridge or cloudflared never uses a name match across the whole process table. A bridge process counts only when argv0 or `/proc/<pid>/exe` is `NODE_BIN` or a program named `node`, one argument is exactly `BRIDGE_ENTRY`, and `/proc/<pid>/cwd` is `BRIDGE_DIR`. Command lines are split on NUL. cloudflared counts only when the binary is cloudflared (or `CLOUDFLARED_BIN`) and the arguments include `tunnel`, `--config` with `CLOUDFLARED_CONFIG`, `run`, and `TUNNEL_NAME`.
 
 ## Paths
 
@@ -23,17 +27,19 @@ Pidfiles live under `XDG_RUNTIME_DIR` when that directory is set, otherwise unde
 | Ops scripts | `${BRIDGE_DIR}/ops/` |
 | Convenience symlinks | `${BRIDGE_HOME}/services/twilio-bridge/` |
 | cloudflared config | `${CLOUDFLARED_CONFIG}` |
-| Run/pid files | `${TWILIO_BRIDGE_RUN_DIR}` or `${XDG_RUNTIME_DIR}/twilio-bridge` or `/tmp/twilio-bridge-<uid>` |
+| Run/pid files | `${TWILIO_BRIDGE_RUN_DIR}` or `/tmp/twilio-bridge-<uid>` |
 | Logs | `${TWILIO_BRIDGE_LOG_DIR}` (default `${BRIDGE_HOME}/var/log/twilio-bridge`) |
 
-The app loads `.env` from the checkout. These scripts read `PORT`, `BRIDGE_API_KEY`, and `ALLOW_UNAUTHENTICATED_OPERATOR` from that file and do not print secret values. Log and run directories are created mode `0700` (`umask 077`). Logs rotate after `TWILIO_BRIDGE_LOG_MAX_BYTES` (default 5 MiB) because bridge logs may contain transcripts.
+Node loads `${BRIDGE_DIR}/.env` from the checkout (dotenv). These scripts do not decide tunnel safety by parsing that file. `BRIDGE_ENV_FILE` is used only to discover `PORT`, with the same dotenv parser and `Number(value || 3000)` expression as the app. Log and run directories are created mode `0700` (`umask 077`).
+
+When `log()` writes, or when a supervisor is about to start a child, a log file larger than `TWILIO_BRIDGE_LOG_MAX_BYTES` (default 5242880) is renamed to the same path with a `.1` suffix and gzipped when `gzip` is on `PATH`. The next rotation replaces that `.1` file. One previous generation is kept.
 
 ## Environment variables
 
 | Variable | Purpose | Default |
 |----------|---------|---------|
 | `BRIDGE_HOME` | Base directory for logs and symlinks | `$HOME` |
-| `TWILIO_BRIDGE_RUN_DIR` | PID files directory | `${XDG_RUNTIME_DIR}/twilio-bridge` or `/tmp/twilio-bridge-<uid>` |
+| `TWILIO_BRIDGE_RUN_DIR` | PID files directory | `/tmp/twilio-bridge-<uid>` |
 | `TWILIO_BRIDGE_LOG_DIR` | Log files directory | `${BRIDGE_HOME}/var/log/twilio-bridge` |
 | `TWILIO_BRIDGE_LOG_MAX_BYTES` | Rotate a log above this size | `5242880` |
 | `CLOUDFLARED_BIN` | cloudflared binary | `${BRIDGE_HOME}/.local/bin/cloudflared` |
@@ -41,14 +47,24 @@ The app loads `.env` from the checkout. These scripts read `PORT`, `BRIDGE_API_K
 | `TUNNEL_NAME` | Cloudflare tunnel name | `twilio-bridge` |
 | `NODE_BIN` | node binary | `command -v node` |
 | `BRIDGE_ENTRY` | Bridge entry point | `src/server.js` |
+| `BRIDGE_ENV_FILE` | File probed for `PORT` | `${BRIDGE_DIR}/.env` |
+| `PROC_ROOT` | Proc filesystem used for identity checks | `/proc` |
 | `SKIP_TUNNEL` | Set to `1` to supervise the bridge only | unset |
-| `PORT` | Listen port checked by status (same value the app reads from `.env`) | `3000` |
+| `PORT` | Listen port (same value the app reads) | `3000` |
+
+`PROC_ROOT` defaults to `/proc`. Tests point it at a fixture directory. `BRIDGE_ENV_FILE` does not change which file node loads. The process always loads `${BRIDGE_DIR}/.env`. If `BRIDGE_ENV_FILE` names a different file, the port probe can disagree with the process; `start.sh` then waits for `/health` on the probed port and does not open the tunnel when that request does not report `authRequired` true.
+
+`start.sh` records `SKIP_TUNNEL=1` under the run directory. `boot.sh` and `status.sh` reuse that choice when `SKIP_TUNNEL` is unset in the environment. A later `./ops/start.sh` with `SKIP_TUNNEL` unset clears the saved choice and starts the tunnel after the health check. An explicit `SKIP_TUNNEL` in the environment wins over the saved file.
 
 ## Tunnel authentication
 
-`start.sh` refuses to launch cloudflared when `BRIDGE_API_KEY` is empty or `ALLOW_UNAUTHENTICATED_OPERATOR=1`. Either setting leaves operator routes (`/call`, `/steer`, `/hangup`, `/voice`, `/transcript`) open, and a tunnel would publish them. Run with `SKIP_TUNNEL=1` for a local-only process. Do not point a public tunnel at this process unless operator authentication is on.
+`start.sh` starts the bridge, waits until `PORT` is listening, then requests `http://127.0.0.1:$PORT/health`. cloudflared is started only when the JSON reports `authRequired` true. `supervise.sh` performs that request again before every tunnel launch, including each restart. The scripts do not read `BRIDGE_API_KEY` or `ALLOW_UNAUTHENTICATED_OPERATOR` out of `.env` to make this decision: inline comments and `export` lines are easy to misread, and a shell parser would not match the process that is actually listening.
 
-Prefer a single ingress hostname to `http://127.0.0.1:<PORT>` rather than a broad publish of the machine.
+If the port never opens, or `/health` does not report `authRequired` true, `start.sh` exits non-zero and does not launch cloudflared. `start.sh` holds an exclusive lock on `${TWILIO_BRIDGE_RUN_DIR}/start.lock` for the length of the start.
+
+Run with `SKIP_TUNNEL=1` for a local-only process. Do not point a public tunnel at this process unless operator authentication is on. `/health` reports `authRequired` true only when the running process has `BRIDGE_API_KEY` set.
+
+Prefer a single ingress hostname to `http://127.0.0.1:$PORT` rather than a broad publish of the machine.
 
 ## Commands
 
@@ -65,11 +81,11 @@ SKIP_TUNNEL=1 ./ops/start.sh
 
 | Event | Survives? |
 |-------|-----------|
-| Child crash (node or cloudflared) | Yes — supervisor restarts with backoff |
+| Child crash (node or cloudflared) | Yes — supervisor restarts with backoff. The tunnel supervisor checks `/health` again before each restart. |
 | Accidental kill of the child only | Yes — supervisor relaunches |
-| `stop.sh` | Stays down until `start.sh` or `boot.sh` |
+| `stop.sh` | Stays down. `stop.sh` writes a disabled marker in the run directory. `boot.sh` (login shell and `@reboot`) exits without starting while that marker exists. `start.sh` removes the marker and starts. |
 | Logout | Yes — processes were started under `nohup` |
-| Machine restart | `@reboot` cron runs `boot.sh` if cron starts; otherwise the next login shell runs the profile hook |
+| Machine restart | `@reboot` cron runs `boot.sh` if cron starts; otherwise the next login shell runs the profile hook. A disabled marker still wins. |
 
 ## Restart check
 
@@ -79,6 +95,8 @@ SKIP_TUNNEL=1 ./ops/start.sh
 ./ops/boot.sh
 ./ops/status.sh
 ```
+
+After `stop.sh`, `boot.sh` leaves the processes down. `start.sh` is what starts them again.
 
 ## systemd
 
@@ -97,9 +115,11 @@ credentials-file: <HOME_DIR>/.cloudflared/<TUNNEL_UUID>.json
 
 ingress:
   - hostname: <YOUR_HOSTNAME>.example.com
-    service: http://127.0.0.1:3000
+    service: http://127.0.0.1:$PORT
   - service: http_status:404
 ```
+
+`$PORT` is the bridge listen port (default 3000).
 
 5. Route DNS for that hostname to the tunnel.
 6. Set `PUBLIC_HOST=<YOUR_HOSTNAME>.example.com` in `.env`, with `BRIDGE_API_KEY` set and `ALLOW_UNAUTHENTICATED_OPERATOR` not set to `1`.
