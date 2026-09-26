@@ -79,13 +79,15 @@ function calendarParts(year, month, day) {
 function isEpochMilliseconds(digits) {
   if (digits.length !== 13) return false;
   const n = Number(digits);
-  return n >= 1000000000000 && n < 100000000000000;
+  return n >= 1000000000000 && n <= 2100000000000;
 }
 
 /**
  * Mask digit runs of 7 or more. Separators may appear inside the run.
- * A letter or digit on either side keeps the text. IPv4 addresses, calendar
- * dates, and 13-digit epoch-millisecond values are left alone.
+ * A letter or digit on either side keeps the text. IPv4 addresses and calendar
+ * dates are left alone. An unprefixed 13-digit run is left alone only when it
+ * is an epoch-millisecond value from 1000000000000 through 2100000000000.
+ * A run that starts with + is never treated as a timestamp.
  */
 function maskPhoneNumbersInText(text) {
   const s = String(text == null ? '' : text).replace(/[\r\n]/g, ' ');
@@ -124,7 +126,7 @@ function maskPhoneNumbersInText(text) {
       !slice ||
       isIpv4(slice) ||
       isCalendarDate(slice) ||
-      isEpochMilliseconds(slice.replace(/\D/g, ''));
+      (!slice.startsWith('+') && isEpochMilliseconds(slice.replace(/\D/g, '')));
     if (digits >= 7 && lastDigit >= i && !isWordChar(after) && !keep) {
       out += maskPhoneNumber(slice);
       i = lastDigit + 1;
@@ -205,7 +207,10 @@ function loadVoiceAliases() {
       return { ...builtIn, ...parsed };
     }
   } catch (err) {
-    console.warn('[warn] VOICE_ALIASES is not valid JSON — ignoring:', err.message);
+    console.warn(
+      '[warn] VOICE_ALIASES is not valid JSON — ignoring:',
+      maskPhoneNumbersInText(err && err.message)
+    );
   }
   return builtIn;
 }
@@ -302,6 +307,11 @@ function switchSessionVoice(session, requested, { announce = true, reason = 'api
 const XAI_VOICE = resolveVoiceId(process.env.XAI_VOICE || process.env.GROK_VOICE || 'ara');
 const XAI_MODEL = process.env.XAI_VOICE_MODEL || 'grok-voice-latest';
 const XAI_REALTIME_URL = `wss://api.x.ai/v1/realtime?model=${encodeURIComponent(XAI_MODEL)}`;
+let grokRealtimeUrlOverride = '';
+
+function setGrokRealtimeUrlForTests(url) {
+  grokRealtimeUrlOverride = url ? String(url) : '';
+}
 
 // Hold-music / IVR hardening: higher VAD threshold + longer silence
 const VAD_THRESHOLD = Number(process.env.VAD_THRESHOLD || 0.7);
@@ -532,7 +542,10 @@ function verifyMediaAuthSignature(callSid, timestamp, signature) {
     
     return { valid: true };
   } catch (err) {
-    return { valid: false, error: `signature verification failed: ${err.message}` };
+    return {
+      valid: false,
+      error: `signature verification failed: ${maskPhoneNumbersInText(err && err.message)}`,
+    };
   }
 }
 
@@ -1042,7 +1055,7 @@ function openGrokSession(session) {
   }
 
   console.log(`[grok] connecting model=${XAI_MODEL} voice=${session.voice}`);
-  const grokWs = new WebSocket(XAI_REALTIME_URL, {
+  const grokWs = new WebSocket(grokRealtimeUrlOverride || XAI_REALTIME_URL, {
     headers: { Authorization: `Bearer ${XAI_API_KEY}` },
   });
   session.grokWs = grokWs;
@@ -2000,4 +2013,8 @@ module.exports = {
   logTwilioMediaJsonParseError,
   logTwilioWsError,
   setTwilioClientForTests,
+  setGrokRealtimeUrlForTests,
+  sessionsByCallSid,
+  handleTwilioMessage,
+  wss,
 };
