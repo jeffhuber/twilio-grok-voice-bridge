@@ -325,6 +325,24 @@ async function main() {
   } else {
     fail(`international mask ${plus86} | ${plus49} | ${outsideEpoch} | ${plusEpoch} | ${epochCeiling}`);
   }
+  const glued = maskPhoneNumbersInText('2026-09-26 198.51.100.10');
+  if (glued === '2026-09-26 198.51.100.10') {
+    pass('a date and an IPv4 address separated by a space both stay');
+  } else {
+    fail(`glued date and address were masked: ${glued}`);
+  }
+  const leadingIp = maskPhoneNumbersInText('198.51.100.10 is documentation');
+  if (leadingIp === '198.51.100.10 is documentation') {
+    pass('an IPv4 address at the start of a string stays');
+  } else {
+    fail(`leading address was masked: ${leadingIp}`);
+  }
+  const leadingZeros = maskPhoneNumbersInText('saw 044.123.45.67 today');
+  if (!leadingZeros.includes('044.123.45.67') && !leadingZeros.includes('044') && leadingZeros.includes('5.67')) {
+    pass('a leading-zero dotted quad is masked');
+  } else {
+    fail(`leading-zero quad was kept: ${leadingZeros}`);
+  }
   const grokServerLogs = [];
   const originalGrokError = console.error;
   console.error = (...args) => {

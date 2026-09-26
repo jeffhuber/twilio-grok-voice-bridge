@@ -10,6 +10,7 @@ require('dotenv').config({ override: true });
 
 const crypto = require('crypto');
 const http = require('http');
+const net = require('net');
 const express = require('express');
 const WebSocket = require('ws');
 const twilio = require('twilio');
@@ -50,17 +51,6 @@ function isWordChar(ch) {
   return isDigitChar(ch) || (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z');
 }
 
-function isIpv4(text) {
-  const parts = String(text).split('.');
-  if (parts.length !== 4) return false;
-  for (let i = 0; i < parts.length; i += 1) {
-    if (!/^\d{1,3}$/.test(parts[i])) return false;
-    const n = Number(parts[i]);
-    if (n > 255) return false;
-  }
-  return true;
-}
-
 function isCalendarDate(text) {
   const ymd = String(text).match(/^(\d{4})[-.](\d{2})[-.](\d{2})$/);
   if (ymd) return calendarParts(ymd[1], ymd[2], ymd[3]);
@@ -76,10 +66,16 @@ function calendarParts(year, month, day) {
   return y >= 1000 && y <= 9999 && m >= 1 && m <= 12 && d >= 1 && d <= 31;
 }
 
+function isExemptAddressOrDate(token) {
+  return net.isIPv4(token) || isCalendarDate(token);
+}
+
 /**
  * Mask digit runs of 7 or more. Separators may appear inside the run.
- * A letter or digit on either side keeps the text. A whole IPv4 address or
- * calendar date is copied through. There is no epoch-millisecond exemption,
+ * A letter or digit on either side keeps the text. An IPv4 address or a
+ * calendar date is copied through per whitespace-delimited token, so a date
+ * and an address separated by a space both stay. A dotted quad is exempt
+ * only when net.isIPv4 accepts it. There is no epoch-millisecond exemption,
  * so a 13-digit run is masked, including a run that starts with +.
  */
 function maskPhoneNumbersInText(text) {
@@ -115,18 +111,59 @@ function maskPhoneNumbersInText(text) {
     }
     const slice = lastDigit >= i ? s.slice(i, lastDigit + 1) : '';
     const after = s[lastDigit + 1] || '';
-    if (slice && (isIpv4(slice) || isCalendarDate(slice))) {
-      out += slice;
-      i = lastDigit + 1;
+    if (!slice) {
+      out += ch;
+      i += 1;
       continue;
     }
-    if (digits >= 7 && lastDigit >= i && !isWordChar(after)) {
-      out += maskPhoneNumber(slice);
-      i = lastDigit + 1;
+    if (!/\s/.test(slice)) {
+      if (isExemptAddressOrDate(slice)) {
+        out += slice;
+        i = lastDigit + 1;
+        continue;
+      }
+      if (digits >= 7 && !isWordChar(after)) {
+        out += maskPhoneNumber(slice);
+        i = lastDigit + 1;
+        continue;
+      }
+      out += ch;
+      i += 1;
       continue;
     }
-    out += ch;
-    i += 1;
+    const tokens = slice.split(/(\s+)/);
+    let group = '';
+    let groupDigits = 0;
+    const flushGroup = (maskIt) => {
+      if (!group) return;
+      out += maskIt ? maskPhoneNumber(group) : group;
+      group = '';
+      groupDigits = 0;
+    };
+    for (let t = 0; t < tokens.length; t += 1) {
+      const token = tokens[t];
+      if (!token) continue;
+      if (/^\s+$/.test(token)) {
+        if (group) group += token;
+        else out += token;
+        continue;
+      }
+      if (isExemptAddressOrDate(token)) {
+        const trailing = group.match(/\s+$/);
+        const heldSpace = trailing ? trailing[0] : '';
+        group = group.slice(0, group.length - heldSpace.length);
+        flushGroup(groupDigits >= 7);
+        out += heldSpace;
+        out += token;
+        continue;
+      }
+      group += token;
+      for (let c = 0; c < token.length; c += 1) {
+        if (isDigitChar(token[c])) groupDigits += 1;
+      }
+    }
+    flushGroup(groupDigits >= 7 && !isWordChar(after));
+    i = lastDigit + 1;
   }
   return out;
 }
@@ -1841,7 +1878,7 @@ function noteUnauthMediaClose() {
 
 function noteMediaStartRejected(error) {
   logAtMostOncePerSecond(mediaRejectLog, () => {
-    console.error(`[twilio] media start rejected: ${error}`);
+    console.error(`[twilio] media start rejected: ${maskPhoneNumbersInText(error)}`);
   });
 }
 
