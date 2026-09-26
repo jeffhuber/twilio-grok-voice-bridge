@@ -126,10 +126,40 @@ if (example.includes('Drop finished sessions') || readme.includes('Drop finished
 
 if (readme.includes('masked either way') || example.includes('masked either way')) {
   fail('docs still say numbers are masked either way');
-} else if (!readme.includes('err.message')) {
-  fail('README does not say Twilio client errors are logged as err.message');
+} else if (readme.includes('without that mask')) {
+  fail('README still says Twilio client errors are logged without a mask');
+} else if (!readme.includes('err.message') || !readme.includes('E.164 numbers in that text are masked')) {
+  fail('README does not say E.164 numbers inside err.message are masked');
 } else {
-  pass('placed-call masking is documented separately from the raw Twilio error line');
+  pass('placed-call and Twilio error logs mask phone numbers');
+}
+
+if (!readme.includes('and BRIDGE_API_KEY is set')) {
+  fail('README step 2 does not say BRIDGE_API_KEY is set');
+} else if (!readme.includes('wss://HOST/media-stream') || !readme.includes('start.customParameters')) {
+  fail('README does not describe the bare Stream URL and start parameters');
+} else if (readme.includes('Token leakage') || readme.includes('Signature burn') || readme.includes('restored to pending')) {
+  fail('README still describes signature restore');
+} else if (!readme.includes('unauthenticated until')) {
+  fail('README does not say the media socket is unauthenticated until start');
+} else {
+  pass('README describes the bare Stream URL, start parameters, and unauthenticated sockets');
+}
+
+if (!readme.includes('DISABLE_OPENER_ON_CONNECT') || !example.includes('DISABLE_OPENER_ON_CONNECT')) {
+  fail('DISABLE_OPENER_ON_CONNECT is missing from the docs');
+} else if (!readme.includes('exactly `1` disables') && !readme.includes('Exactly `1` disables')) {
+  fail('README does not say exactly 1 disables the connect greeting');
+} else {
+  pass('DISABLE_OPENER_ON_CONNECT is documented as exactly 1 disables');
+}
+
+if (!readme.includes('NEVER_CONNECTED_TIMEOUT_MS') || !example.includes('NEVER_CONNECTED_TIMEOUT_MS')) {
+  fail('NEVER_CONNECTED_TIMEOUT_MS is missing from the docs');
+} else if (!readme.includes('never connected')) {
+  fail('README does not keep a never-connected session out of the early sweep');
+} else {
+  pass('never-connected sessions are documented');
 }
 
 if (!readme.includes('not minted or verified') || !readme.includes('even if `MEDIA_STREAM_SECRET` is set')) {
