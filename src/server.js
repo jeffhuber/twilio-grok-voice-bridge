@@ -494,9 +494,9 @@ const NEVER_CONNECTED_TIMEOUT_DEFAULT_MS = 600000;
 function readNeverConnectedTimeout(raw = process.env.NEVER_CONNECTED_TIMEOUT_MS) {
   if (raw === undefined || raw === '') return NEVER_CONNECTED_TIMEOUT_DEFAULT_MS;
   const value = Number(raw);
-  if (!Number.isFinite(value) || !Number.isInteger(value) || value <= 0) {
+  if (!Number.isFinite(value) || !Number.isInteger(value) || value < 1000) {
     console.warn(
-      `[warn] NEVER_CONNECTED_TIMEOUT_MS=${raw} is not a positive integer; using ${NEVER_CONNECTED_TIMEOUT_DEFAULT_MS}`
+      `[warn] NEVER_CONNECTED_TIMEOUT_MS=${raw} must be an integer of at least 1000; using ${NEVER_CONNECTED_TIMEOUT_DEFAULT_MS}`
     );
     return NEVER_CONNECTED_TIMEOUT_DEFAULT_MS;
   }
@@ -1393,7 +1393,6 @@ function applyMediaStart(ws, msg, options) {
   }
 
   session.twilioWs = ws;
-  session.everConnected = true;
   session.streamSid = msg.start?.streamSid || msg.streamSid || '';
   const open = (options && options.openGrokSession) || openGrokSession;
   open(session);
