@@ -129,6 +129,11 @@ jobs:
           # Exit with test result
           exit $TEST_EXIT
       
+      - name: Run ringing-session GC test
+        env:
+          BRIDGE_API_KEY: ci-test-key-not-a-secret
+        run: node test/test-ringing-session-gc.js
+
       - name: Security audit (advisory only)
         run: |
           echo "=== Running npm audit (advisory only) ==="

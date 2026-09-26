@@ -132,7 +132,7 @@ Anyone who captures the TwiML `<Parameter>` values can open `/media-stream` and 
 
 **Crash containment:** All WebSocket message handlers validate and parse JSON defensively. Malformed or null frames are logged and ignored per-socket; parsing errors never crash the Node process.
 
-**Session garbage collection:** Orphan sessions (both WebSockets closed) and sessions exceeding `SESSION_MAX_AGE_MS` (default 2 hours) are automatically cleaned up every 2 minutes. This prevents memory leaks from interrupted or abandoned calls.
+**Session garbage collection:** Every 2 minutes, a session whose sockets were connected and are now both gone is removed. A session that has never connected (still ringing, no media or model socket yet) is kept until it is older than `NEVER_CONNECTED_TIMEOUT_MS` (default 600000, 10 minutes), so an early sweep does not make `/twiml-connect` return 404. A live session older than `SESSION_MAX_AGE_MS` (default 2 hours) is hung up. `NEVER_CONNECTED_TIMEOUT_MS` must be an integer of at least 60000 milliseconds. `NaN`, `0`, `999`, `1000`, `59999`, negative numbers, and `Infinity` log a warning and use the default.
 
 **One stream per CallSid:** The bridge enforces one active Twilio Media Stream per CallSid. Duplicate stream attempts for the same call are rejected with WebSocket close code 1008.
 
@@ -186,7 +186,8 @@ For public hosts, **always** use one of:
 | MEDIA_STREAM_SECRET | Optional dedicated HMAC key, used only when `BRIDGE_API_KEY` is also set. When non-empty after trim, signatures use this value instead of `BRIDGE_API_KEY` so the two keys can rotate separately. If `BRIDGE_API_KEY` is unset, this value is ignored and signatures are not minted or verified. Read once at startup. A non-empty value shorter than 32 bytes logs a warning and is still accepted. |
 | ALLOW_UNAUTHENTICATED_OPERATOR | Set to `1` to bypass operator-route auth when BRIDGE_API_KEY is unset (localhost demos only — never use for shared/public deployments). Server exits on startup if BRIDGE_API_KEY is missing and this is not set. This does not enable media HMAC. |
 | MEDIA_AUTH_WINDOW_MS | HMAC signature validity window in milliseconds (default 120000 = 2 minutes) |
-| SESSION_MAX_AGE_MS | Maximum session age before GC in milliseconds (default 7200000 = 2 hours) |
+| SESSION_MAX_AGE_MS | Maximum live-session age before hangup, in milliseconds (default 7200000 = 2 hours) |
+| NEVER_CONNECTED_TIMEOUT_MS | How long a never-connected (still ringing) session is kept, in milliseconds (default 600000 = 10 minutes). An integer of at least 60000. Anything else warns and uses the default. |
 | ENABLE_RECORDING | Set to `1` to enable dual-channel call recording (default off) |
 | SKIP_AI_DISCLOSURE | Set to `1` to disable AI disclosure (default: disclosure enabled; check legal requirements first) |
 | LOG_TRANSCRIPTS | Set to `1` to enable transcript logging in stdout (default off for privacy; destination phone numbers are masked regardless) |

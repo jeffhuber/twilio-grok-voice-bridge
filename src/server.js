@@ -555,9 +555,25 @@ function cleanupExpiredTokens() {
 setInterval(cleanupExpiredTokens, 60000);
 
 const SESSION_MAX_AGE_MS = Number(process.env.SESSION_MAX_AGE_MS || 7200000); // 2 hours
+const NEVER_CONNECTED_TIMEOUT_DEFAULT_MS = 600000;
 
-function cleanupOrphanSessions() {
-  const now = Date.now();
+function readNeverConnectedTimeout(raw = process.env.NEVER_CONNECTED_TIMEOUT_MS) {
+  if (raw === undefined || raw === '') return NEVER_CONNECTED_TIMEOUT_DEFAULT_MS;
+  const value = Number(raw);
+  if (!Number.isFinite(value) || !Number.isInteger(value) || value < 60000) {
+    console.warn(
+      `[warn] NEVER_CONNECTED_TIMEOUT_MS=${raw} must be an integer of at least 60000; using ${NEVER_CONNECTED_TIMEOUT_DEFAULT_MS}`
+    );
+    return NEVER_CONNECTED_TIMEOUT_DEFAULT_MS;
+  }
+  return value;
+}
+
+// A /call that is still ringing has no sockets yet. The 2-minute sweep must not
+// drop it; /twiml-connect looks the session up until the callee answers.
+const NEVER_CONNECTED_TIMEOUT_MS = readNeverConnectedTimeout();
+
+function cleanupOrphanSessions(now = Date.now()) {
   let cleaned = 0;
   for (const [callSid, session] of sessionsByCallSid.entries()) {
     const age = now - (session.startedAt || now);
@@ -565,6 +581,11 @@ function cleanupOrphanSessions() {
     const grokGone = !session.grokWs || session.grokWs.readyState !== WebSocket.OPEN;
     const isOrphan = wsGone && grokGone;
     const isTooOld = age > SESSION_MAX_AGE_MS;
+    const stillRinging = isOrphan && !session.everConnected && age <= NEVER_CONNECTED_TIMEOUT_MS;
+
+    if (stillRinging) {
+      continue;
+    }
 
     if (isOrphan) {
       console.log(`[gc] cleanup orphan session callSid=${callSid} age=${Math.round(age / 1000)}s`);
@@ -746,6 +767,7 @@ function createSession({ callSid, goal, context, voice, style, to, softContinue,
     awaitingAudioConfigAck: false,
     twilioWs: null,
     grokWs: null,
+    everConnected: false,
     transcript: [],
     hangupRequested: false,
     hangupApproved: false,
@@ -1111,6 +1133,7 @@ function onGrokSocketOpen(session, send) {
 }
 
 function openGrokSession(session) {
+  session.everConnected = true;
   if (!XAI_API_KEY) {
     console.error('[grok] XAI_API_KEY not set');
     return;
@@ -2389,6 +2412,13 @@ module.exports = {
   mintMediaAuth,
   authorizeMediaStart,
   applyMediaStart,
+  openGrokSession,
+  cleanupOrphanSessions,
+  sessionsByCallSid,
+  pendingByCallSid,
+  readNeverConnectedTimeout,
+  NEVER_CONNECTED_TIMEOUT_MS,
+  SESSION_MAX_AGE_MS,
   MEDIA_WS_MAX_PAYLOAD,
   MEDIA_START_TIMEOUT_MS,
   MAX_AWAITING_MEDIA_SOCKETS,
