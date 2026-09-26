@@ -707,8 +707,9 @@ unset SKIP_TUNNEL
 echo "ok bridge restart health gate"
 
 install_home="${TMP}/install-home"
-mkdir -p "${install_home}/bin" "${TMP}/frozen-run"
-cat > "${install_home}/bin/crontab" << 'EOF'
+# common.sh puts ${BRIDGE_HOME}/.local/bin ahead of /usr/bin, so the stub has to live there.
+mkdir -p "${install_home}/.local/bin" "${TMP}/frozen-run"
+cat > "${install_home}/.local/bin/crontab" << 'EOF'
 #!/bin/bash
 set -euo pipefail
 file="${CRON_CAPTURE:?}"
@@ -725,14 +726,14 @@ fi
 echo "unexpected crontab args" >&2
 exit 1
 EOF
-chmod +x "${install_home}/bin/crontab"
+chmod +x "${install_home}/.local/bin/crontab"
 : > "${TMP}/cron-capture"
 env \
   HOME="${install_home}" \
   BRIDGE_HOME="${install_home}" \
   TWILIO_BRIDGE_RUN_DIR="${TMP}/frozen-run" \
   TWILIO_BRIDGE_LOG_DIR="${TMP}/install-log" \
-  PATH="${install_home}/bin:${PATH}" \
+    PATH="${install_home}/.local/bin:${PATH}" \
   CRON_CAPTURE="${TMP}/cron-capture" \
   "${ROOT}/ops/install-boot.sh" >"${TMP}/install1.log" 2>&1
 if ! grep -Fq "TWILIO_BRIDGE_RUN_DIR=${TMP}/frozen-run" "${install_home}/.profile"; then
@@ -751,7 +752,7 @@ env \
   BRIDGE_HOME="${install_home}" \
   TWILIO_BRIDGE_RUN_DIR="${TMP}/frozen-run" \
   TWILIO_BRIDGE_LOG_DIR="${TMP}/install-log" \
-  PATH="${install_home}/bin:${PATH}" \
+    PATH="${install_home}/.local/bin:${PATH}" \
   CRON_CAPTURE="${TMP}/cron-capture" \
   "${ROOT}/ops/install-boot.sh" >"${TMP}/install2.log" 2>&1
 profile_markers="$(grep -c 'twilio-bridge-boot' "${install_home}/.profile")"
@@ -776,7 +777,7 @@ env \
   BRIDGE_HOME="${install_home}" \
   TWILIO_BRIDGE_RUN_DIR="${TMP}/frozen-run" \
   TWILIO_BRIDGE_LOG_DIR="${TMP}/install-log" \
-  PATH="${install_home}/bin:${PATH}" \
+    PATH="${install_home}/.local/bin:${PATH}" \
   CRON_CAPTURE="${TMP}/cron-capture" \
   "${ROOT}/ops/install-boot.sh" >"${TMP}/install3.log" 2>&1
 if ! grep -q 'keep-profile' "${install_home}/.profile"; then
