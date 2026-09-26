@@ -292,9 +292,10 @@ async function main() {
     maskedLog.includes('0100') &&
     maskedLog.includes('203.0.113.50') &&
     maskedLog.includes('2026-09-26') &&
-    maskedLog.includes('1727350123456')
+    !maskedLog.includes('1727350123456') &&
+    maskedLog.includes('3456')
   ) {
-    pass('log masking keeps IPv4 addresses, dates, and millisecond timestamps');
+    pass('log masking keeps IPv4 addresses and dates and masks 13-digit runs');
   } else {
     fail(`mask result ${maskedLog}`);
   }
@@ -303,6 +304,8 @@ async function main() {
   const outsideEpoch = maskPhoneNumbersInText('id 8613800000000 and 2100000000001');
   const plusEpoch = maskPhoneNumbersInText('stamp +1727350123456');
   const epochCeiling = maskPhoneNumbersInText('edge 2100000000000');
+  const cnMobile = maskPhoneNumbersInText('failed for +8613812345678 today');
+  const deMobile = maskPhoneNumbersInText('failed for +4915112345678 today');
   if (
     !plus86.includes('+8613800000000') &&
     !plus86.includes('+86') &&
@@ -314,11 +317,16 @@ async function main() {
     !outsideEpoch.includes('2100000000001') &&
     !plusEpoch.includes('+1727350123456') &&
     plusEpoch.includes('3456') &&
-    epochCeiling.includes('2100000000000')
+    !epochCeiling.includes('2100000000000') &&
+    epochCeiling.includes('0000') &&
+    !cnMobile.includes('+8613812345678') &&
+    cnMobile.includes('5678') &&
+    !deMobile.includes('+4915112345678') &&
+    deMobile.includes('5678')
   ) {
-    pass('a leading plus is masked, including the country code, and only in-range epoch values stay');
+    pass('a leading plus is masked, including the country code, and 13-digit runs are masked');
   } else {
-    fail(`international mask ${plus86} | ${plus49} | ${outsideEpoch} | ${plusEpoch} | ${epochCeiling}`);
+    fail(`international mask ${plus86} | ${plus49} | ${outsideEpoch} | ${plusEpoch} | ${epochCeiling} | ${cnMobile} | ${deMobile}`);
   }
 
   const xml = buildConnectTwiml({
@@ -858,6 +866,30 @@ async function main() {
       pass('a failed upgrade signature is logged once per second with the host masked');
     } else {
       fail(`upgrade signature logs ${JSON.stringify(addedSig)}`);
+    }
+
+    await delay(1100);
+    const longHost = `${'h'.repeat(180)}.example.com`;
+    const longBefore = sigLines().length;
+    const longSock = await rawUpgrade(port, {
+      Host: longHost,
+      'X-Twilio-Signature': replayHeader,
+      'CF-Connecting-IP': '198.51.100.70',
+    });
+    held.push(longSock);
+    longSock.destroy();
+    await delay(50);
+    const longAdded = sigLines().slice(longBefore);
+    const hostPrefix = longHost.slice(0, 128);
+    if (
+      longAdded.length === 1 &&
+      longAdded[0].includes(`host=${hostPrefix}`) &&
+      !longAdded[0].includes(longHost) &&
+      !longAdded[0].includes(replayHeader)
+    ) {
+      pass('a rejected upgrade host is truncated to 128 characters');
+    } else {
+      fail(`long host logs ${JSON.stringify(longAdded)}`);
     }
   } finally {
     for (const sock of held) {
