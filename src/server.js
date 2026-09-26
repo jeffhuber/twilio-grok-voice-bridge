@@ -467,7 +467,7 @@ const sessionsByCallSid = new Map();
 const pendingByCallSid = new Map();
 /** @type {Map<string, {session: CallSession, createdAt: number}>} HMAC signature -> {session, timestamp} */
 const pendingByToken = new Map();
-/** @type {Map<string, {session: CallSession, createdAt: number}>} HMAC signature -> {session, timestamp} - claimed on upgrade */
+/** @type {Map<string, {session: CallSession, createdAt: number}>} HMAC signature -> {session, timestamp} - claimed on start */
 const claimedTokens = new Map();
 
 const MEDIA_AUTH_WINDOW_MS = Number(process.env.MEDIA_AUTH_WINDOW_MS || 120000); // 2 minutes
@@ -1353,6 +1353,93 @@ function cleanupSession(session, { hangupTwilio } = { hangupTwilio: false }) {
   }
 }
 
+/**
+ * Mint a single-use media HMAC and remember it until the start event claims it.
+ * @param {CallSession} session
+ * @param {string} callSid
+ * @param {number} [nowMs]
+ */
+function mintMediaAuth(session, callSid, nowMs) {
+  if (session.mediaAuthSignature) {
+    pendingByToken.delete(session.mediaAuthSignature);
+    claimedTokens.delete(session.mediaAuthSignature);
+    console.log(`[twiml-connect] Invalidated previous signature callSid=${callSid}`);
+  }
+  const timestamp = nowMs == null ? Date.now() : nowMs;
+  const signature = generateMediaAuthSignature(callSid, timestamp);
+  session.mediaAuthTimestamp = timestamp;
+  session.mediaAuthSignature = signature;
+  pendingByToken.set(signature, { session, createdAt: timestamp });
+  return { timestamp, signature };
+}
+
+/**
+ * Authenticate a Twilio start event from start.customParameters only.
+ * Query strings are ignored: Twilio error 31920 rejects them on <Stream url>.
+ * @param {object} msg
+ * @returns {{ ok: true, session: CallSession, signature: string } | { ok: false, error: string }}
+ */
+function authorizeMediaStart(msg) {
+  const custom = msg?.start?.customParameters || {};
+  const callSid = custom.callSid ? String(custom.callSid) : '';
+  const timestamp = custom.timestamp ? String(custom.timestamp) : '';
+  const signature = custom.signature ? String(custom.signature) : '';
+  const startCallSid = msg?.start?.callSid ? String(msg.start.callSid) : '';
+
+  if (!callSid || !timestamp || !signature || !startCallSid) {
+    return { ok: false, error: 'missing auth params' };
+  }
+  if (startCallSid !== callSid) {
+    return { ok: false, error: 'callSid mismatch' };
+  }
+  if (claimedTokens.has(signature)) {
+    return { ok: false, error: 'signature replayed' };
+  }
+
+  const verification = verifyMediaAuthSignature(callSid, timestamp, signature);
+  if (!verification.valid) {
+    return { ok: false, error: verification.error || 'invalid signature' };
+  }
+
+  const entry = pendingByToken.get(signature);
+  if (!entry) {
+    return { ok: false, error: 'no pending session' };
+  }
+  if (entry.session.callSid !== callSid) {
+    return { ok: false, error: 'callSid mismatch' };
+  }
+
+  pendingByToken.delete(signature);
+  claimedTokens.set(signature, entry);
+  return { ok: true, session: entry.session, signature };
+}
+
+/**
+ * Claim the start event, bind the socket, and open the model session.
+ * @param {import('ws')} ws
+ * @param {object} msg
+ * @param {{ openGrokSession?: (session: CallSession) => void }} [options]
+ */
+function applyMediaStart(ws, msg, options) {
+  const auth = authorizeMediaStart(msg);
+  if (!auth.ok) return auth;
+
+  const session = auth.session;
+  if (
+    session.twilioWs &&
+    session.twilioWs !== ws &&
+    session.twilioWs.readyState === WebSocket.OPEN
+  ) {
+    return { ok: false, error: 'duplicate stream', signature: auth.signature };
+  }
+
+  session.twilioWs = ws;
+  session.streamSid = msg.start?.streamSid || msg.streamSid || '';
+  const open = (options && options.openGrokSession) || openGrokSession;
+  open(session);
+  return { ok: true, session, signature: auth.signature };
+}
+
 function buildConnectTwiml({ goal, context, voice, style, softContinue, callSid, timestamp, signature }) {
   if (!PUBLIC_HOST) {
     throw new Error('PUBLIC_HOST is not set (hostname only, no scheme)');
@@ -1360,7 +1447,9 @@ function buildConnectTwiml({ goal, context, voice, style, softContinue, callSid,
   if (!callSid || !timestamp || !signature) {
     throw new Error('callSid, timestamp, and signature are required for HMAC auth');
   }
-  const streamUrl = `wss://${PUBLIC_HOST}/media-stream?callSid=${encodeURIComponent(callSid)}&timestamp=${encodeURIComponent(timestamp)}&signature=${encodeURIComponent(signature)}`;
+  // Twilio error 31920: <Stream url> must not contain a query string.
+  // callSid, timestamp, and signature travel as <Parameter> values.
+  const streamUrl = `wss://${PUBLIC_HOST}/media-stream`;
   const vr = new twilio.twiml.VoiceResponse();
   const connect = vr.connect();
   const stream = connect.stream({ url: streamUrl });
@@ -1370,7 +1459,7 @@ function buildConnectTwiml({ goal, context, voice, style, softContinue, callSid,
   if (voice) stream.parameter({ name: 'voice', value: String(voice).slice(0, 100) });
   if (style) stream.parameter({ name: 'style', value: String(style).slice(0, 40) });
   if (softContinue) stream.parameter({ name: 'softContinue', value: 'true' });
-  // Store auth params in custom parameters for verification on start event
+  // Auth is verified from start.customParameters. Do not also put these on the URL.
   stream.parameter({ name: 'callSid', value: callSid });
   stream.parameter({ name: 'timestamp', value: String(timestamp) });
   stream.parameter({ name: 'signature', value: signature });
@@ -1531,20 +1620,9 @@ app.all('/twiml-connect', (req, res) => {
       sessionsByCallSid.set(callSid, session);
     }
 
-    // Invalidate previous signature for this session before minting new one
-    if (session.mediaAuthSignature) {
-      pendingByToken.delete(session.mediaAuthSignature);
-      claimedTokens.delete(session.mediaAuthSignature);
-      console.log(`[twiml-connect] Invalidated previous signature callSid=${callSid}`);
-    }
-
-    // Generate new HMAC auth params
-    const timestamp = Date.now();
-    const signature = generateMediaAuthSignature(callSid, timestamp);
-
-    session.mediaAuthTimestamp = timestamp;
-    session.mediaAuthSignature = signature;
-    pendingByToken.set(signature, { session, createdAt: timestamp });
+    const minted = mintMediaAuth(session, callSid);
+    const timestamp = minted.timestamp;
+    const signature = minted.signature;
 
     const twiml = buildConnectTwiml({
       goal: session.goal,
@@ -1757,62 +1835,244 @@ app.post('/hangup', requireBridgeAuth, async (req, res) => {
   res.json({ ok: true, callSid: session.callSid });
 });
 
+const MEDIA_WS_MAX_PAYLOAD = 64 * 1024;
+const MEDIA_START_TIMEOUT_MS = 5000;
+const MAX_AWAITING_MEDIA_SOCKETS = 32;
+const MAX_AWAITING_MEDIA_SOCKETS_PER_CLIENT = 4;
+const MAX_AWAITING_SIGNED_MEDIA_SOCKETS = 128;
+const MAX_AWAITING_SIGNED_MEDIA_SOCKETS_PER_CLIENT = 8;
+const MEDIA_PREBIND_TERMINATE_MS = 1000;
+
 const server = http.createServer(app);
-const wss = new WebSocket.Server({ noServer: true });
+const wss = new WebSocket.Server({ noServer: true, maxPayload: MEDIA_WS_MAX_PAYLOAD });
+let awaitingMediaStarts = 0;
+let awaitingSignedMediaStarts = 0;
+const unauthMediaLog = { at: 0 };
+const mediaRejectLog = { at: 0 };
+const wsErrorLog = { at: 0 };
+const upgradeSigRejectLog = { at: 0 };
+const prebindKillTimers = new WeakMap();
+/** @type {UnboundMediaSocket[]} */
+const unboundMediaSockets = [];
+
+/**
+ * @typedef {object} UnboundMediaSocket
+ * @property {import('ws')} ws
+ * @property {string} clientKey
+ * @property {'signed'|'unsigned'} pool
+ * @property {boolean} counted
+ * @property {boolean} bound
+ * @property {boolean} dropped
+ * @property {(code: number, reason: string) => void} drop
+ */
+
+function logAtMostOncePerSecond(bucket, emit) {
+  const now = Date.now();
+  if (now - bucket.at < 1000) return;
+  bucket.at = now;
+  emit();
+}
+
+function noteUnauthMediaClose() {
+  logAtMostOncePerSecond(unauthMediaLog, () => {
+    console.warn('[twilio] closed media socket before a bound start');
+  });
+}
+
+function noteMediaStartRejected(error) {
+  logAtMostOncePerSecond(mediaRejectLog, () => {
+    console.error(`[twilio] media start rejected: ${error}`);
+  });
+}
+
+function noteWsError(err) {
+  logAtMostOncePerSecond(wsErrorLog, () => {
+    console.error('[twilio] ws error:', maskPhoneNumbersInText(err && err.message));
+  });
+}
+
+function noteUpgradeSignatureRejected(host, pathOnly) {
+  const loggedHost = String(host == null ? '' : host).slice(0, 128);
+  logAtMostOncePerSecond(upgradeSigRejectLog, () => {
+    console.warn(
+      `[twilio] media upgrade signature rejected host=${maskPhoneNumbersInText(loggedHost)} path=${maskPhoneNumbersInText(pathOnly)}`
+    );
+  });
+}
+
+function normalizeIp(addr) {
+  if (!addr) return '';
+  let text = String(addr).trim().toLowerCase();
+  const zone = text.indexOf('%');
+  if (zone >= 0) text = text.slice(0, zone);
+  return text.startsWith('::ffff:') ? text.slice('::ffff:'.length) : text;
+}
+
+function expandIpv6(addr) {
+  const text = normalizeIp(addr);
+  if (!text || text.includes('.')) return null;
+  const halves = text.split('::');
+  if (halves.length > 2) return null;
+  const head = halves[0] ? halves[0].split(':') : [];
+  const tail = halves.length === 2 ? (halves[1] ? halves[1].split(':') : []) : [];
+  if (halves.length === 1 && head.length !== 8) return null;
+  const missing = 8 - head.length - tail.length;
+  if (missing < 0) return null;
+  const groups = halves.length === 1 ? head : head.concat(Array(missing).fill('0'), tail);
+  if (groups.length !== 8) return null;
+  if (groups.some((group) => !/^[0-9a-f]{1,4}$/.test(group))) return null;
+  return groups.map((group) => group.padStart(4, '0'));
+}
+
+/** IPv4 stays the full address. IPv6 is the /64 prefix. */
+function networkKey(addr) {
+  const ip = normalizeIp(addr);
+  if (!ip) return 'unknown';
+  if (!ip.includes(':')) return ip;
+  const groups = expandIpv6(ip);
+  if (!groups) return ip;
+  return groups.slice(0, 4).join(':');
+}
+
+function isTrustedTunnelPeer(addr) {
+  const ip = normalizeIp(addr);
+  return ip === '127.0.0.1' || ip === '::1';
+}
+
+function firstHeader(value) {
+  if (Array.isArray(value)) return value[0];
+  return value;
+}
+
+/**
+ * Per-client key for unbound media sockets.
+ * CF-Connecting-IP is used only when the TCP peer is loopback, which is the
+ * local cloudflared process. Behind that tunnel every socket is 127.0.0.1.
+ * Any other peer is keyed by remote address so a client cannot spoof the header.
+ * IPv6 clients share a key for the /64 prefix.
+ * @param {import('http').IncomingMessage} req
+ */
+function mediaClientKey(req) {
+  const remote = normalizeIp(req && req.socket && req.socket.remoteAddress);
+  if (isTrustedTunnelPeer(remote)) {
+    const raw = firstHeader(req && req.headers && req.headers['cf-connecting-ip']);
+    if (typeof raw === 'string') {
+      const cf = raw.split(',')[0].trim();
+      if (cf && cf.length <= 64 && !/\s/.test(cf)) return `cf:${networkKey(cf)}`;
+    }
+  }
+  return `ip:${remote ? networkKey(remote) : 'unknown'}`;
+}
+
+/**
+ * A valid X-Twilio-Signature moves the socket into the signed pre-bind pool.
+ * It does not exempt the socket from every cap: the signature is static for
+ * the host and does not expire. No token means nothing is signed.
+ * A present header that does not validate is logged (rate-limited) and the
+ * socket stays in the unsigned pool.
+ * @param {import('http').IncomingMessage} req
+ */
+function mediaUpgradeIsTwilioSigned(req) {
+  if (!TWILIO_AUTH_TOKEN || !req || !req.headers) return false;
+  const signature = firstHeader(req.headers['x-twilio-signature']);
+  if (typeof signature !== 'string' || signature.length === 0) return false;
+  const pathOnly = String(req.url || '/media-stream').split('?')[0] || '/media-stream';
+  const hosts = [];
+  if (PUBLIC_HOST) hosts.push(PUBLIC_HOST);
+  const hostHeader = firstHeader(req.headers.host);
+  if (typeof hostHeader === 'string' && hostHeader && hosts.indexOf(hostHeader) === -1) {
+    hosts.push(hostHeader);
+  }
+  for (let i = 0; i < hosts.length; i += 1) {
+    const host = hosts[i];
+    const urls = [`wss://${host}${pathOnly}`, `https://${host}${pathOnly}`];
+    for (let j = 0; j < urls.length; j += 1) {
+      try {
+        if (twilio.validateRequest(TWILIO_AUTH_TOKEN, signature, urls[j], {})) return true;
+      } catch {
+        /* malformed URL */
+      }
+    }
+  }
+  const loggedHost = typeof hostHeader === 'string' && hostHeader ? hostHeader : PUBLIC_HOST || '';
+  noteUpgradeSignatureRejected(loggedHost, pathOnly);
+  return false;
+}
+
+function forgetUnbound(entry) {
+  const idx = unboundMediaSockets.indexOf(entry);
+  if (idx >= 0) unboundMediaSockets.splice(idx, 1);
+}
+
+function unboundCountFor(clientKey, pool) {
+  let count = 0;
+  for (let i = 0; i < unboundMediaSockets.length; i += 1) {
+    const entry = unboundMediaSockets[i];
+    if (entry.counted && entry.pool === pool && entry.clientKey === clientKey) count += 1;
+  }
+  return count;
+}
+
+function poolLimit(pool, kind) {
+  if (pool === 'signed' && kind === 'client') return MAX_AWAITING_SIGNED_MEDIA_SOCKETS_PER_CLIENT;
+  if (pool === 'signed') return MAX_AWAITING_SIGNED_MEDIA_SOCKETS;
+  if (kind === 'client') return MAX_AWAITING_MEDIA_SOCKETS_PER_CLIENT;
+  return MAX_AWAITING_MEDIA_SOCKETS;
+}
+
+function poolSize(pool) {
+  return pool === 'signed' ? awaitingSignedMediaStarts : awaitingMediaStarts;
+}
+
+function bumpPool(pool, delta) {
+  if (pool === 'signed') awaitingSignedMediaStarts += delta;
+  else awaitingMediaStarts += delta;
+}
+
+function evictOldestUnbound(pool, clientKey) {
+  for (let i = 0; i < unboundMediaSockets.length; i += 1) {
+    const entry = unboundMediaSockets[i];
+    if (entry.pool !== pool || !entry.counted || entry.bound || entry.dropped) continue;
+    if (clientKey && entry.clientKey !== clientKey) continue;
+    entry.drop(1008, 'evicted');
+    return true;
+  }
+  return false;
+}
+
+function armPrebindTerminate(ws) {
+  if (prebindKillTimers.has(ws)) return;
+  const timer = setTimeout(() => {
+    prebindKillTimers.delete(ws);
+    try {
+      ws.terminate();
+    } catch {
+      /* already gone */
+    }
+  }, MEDIA_PREBIND_TERMINATE_MS);
+  if (typeof timer.unref === 'function') timer.unref();
+  prebindKillTimers.set(ws, timer);
+  ws.once('close', () => {
+    const pending = prebindKillTimers.get(ws);
+    if (pending) clearTimeout(pending);
+    prebindKillTimers.delete(ws);
+  });
+}
+
+function rejectPrebindSocket(ws, code, reason) {
+  noteUnauthMediaClose();
+  try {
+    ws.close(code, reason);
+  } catch {
+    /* already closing */
+  }
+  armPrebindTerminate(ws);
+}
 
 server.on('upgrade', (req, socket, head) => {
+  // Auth is not in the URL. Twilio error 31920 rejects <Stream url> query strings.
   const path = (req.url || '').split('?')[0];
   if (path === '/media-stream') {
-    const url = new URL(req.url || '', `wss://${PUBLIC_HOST || req.headers.host}`);
-    const callSid = url.searchParams.get('callSid');
-    const timestamp = url.searchParams.get('timestamp');
-    const signature = url.searchParams.get('signature');
-
-    if (!callSid || !timestamp || !signature) {
-      console.error('[media-stream] Missing required auth params (callSid, timestamp, signature)');
-      socket.write('HTTP/1.1 400 Bad Request\r\n\r\n');
-      socket.destroy();
-      return;
-    }
-
-    // Verify HMAC signature
-    const verification = verifyMediaAuthSignature(callSid, timestamp, signature);
-    if (!verification.valid) {
-      console.error(`[media-stream] HMAC verification failed: ${verification.error} callSid=${callSid}`);
-      socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
-      socket.destroy();
-      return;
-    }
-
-    // Check if signature already claimed (prevent reuse)
-    if (claimedTokens.has(signature)) {
-      console.error(`[media-stream] Signature already claimed callSid=${callSid} ts=${timestamp}`);
-      socket.write('HTTP/1.1 409 Conflict\r\n\r\n');
-      socket.destroy();
-      return;
-    }
-
-    // Look up pending session by signature
-    const entry = pendingByToken.get(signature);
-    if (!entry) {
-      console.error(`[media-stream] No pending session for signature callSid=${callSid} ts=${timestamp}`);
-      socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
-      socket.destroy();
-      return;
-    }
-
-    // Verify CallSid matches the session
-    if (entry.session.callSid !== callSid) {
-      console.error(`[media-stream] CallSid mismatch: expected=${entry.session.callSid} actual=${callSid}`);
-      socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
-      socket.destroy();
-      return;
-    }
-
-    console.log(`[media-stream] HMAC auth success callSid=${callSid} ts=${timestamp}`);
-    claimedTokens.set(signature, entry);
-    pendingByToken.delete(signature);
-
     wss.handleUpgrade(req, socket, head, (ws) => {
       wss.emit('connection', ws, req);
     });
@@ -1822,152 +2082,149 @@ server.on('upgrade', (req, socket, head) => {
 });
 
 wss.on('connection', (ws, req) => {
-  console.log('[twilio] media-stream websocket connected');
+  // The upgrade is unauthenticated. Twilio sends one "connected" event, then "start".
+  const clientKey = mediaClientKey(req);
+  const exempt = mediaUpgradeIsTwilioSigned(req);
+  const pool = exempt ? 'signed' : 'unsigned';
+  /** @type {UnboundMediaSocket|null} */
+  let entry = null;
 
-  const url = new URL(req.url || '', `wss://${PUBLIC_HOST || req.headers.host}`);
-  const signature = url.searchParams.get('signature');
-  const callSid = url.searchParams.get('callSid');
+  ws.on('error', (err) => {
+    noteWsError(err);
+    if (!entry || !entry.bound) armPrebindTerminate(ws);
+  });
 
-  if (!signature || !callSid) {
-    console.error('[twilio] Missing signature or callSid on connection');
-    ws.close(1008, 'Missing auth params');
-    return;
+  if (unboundCountFor(clientKey, pool) >= poolLimit(pool, 'client')) {
+    const evicted = pool === 'signed' && evictOldestUnbound(pool, clientKey);
+    if (!evicted) {
+      rejectPrebindSocket(ws, 1008, 'too many pending streams');
+      return;
+    }
   }
-
-  const entry = claimedTokens.get(signature);
-  if (!entry) {
-    console.error(`[twilio] Signature not claimed callSid=${callSid}`);
-    ws.close(1008, 'Invalid signature');
-    return;
+  if (poolSize(pool) >= poolLimit(pool, 'global')) {
+    if (!evictOldestUnbound(pool)) {
+      rejectPrebindSocket(ws, 1008, 'too many pending streams');
+      return;
+    }
   }
 
   /** @type {CallSession|null} */
-  let session = entry.session;
-  let boundToCallSid = false;
+  let session = null;
+  let signature = '';
+  let sawConnected = false;
+
+  entry = {
+    ws,
+    clientKey,
+    pool,
+    counted: false,
+    bound: false,
+    dropped: false,
+    drop() {},
+  };
+
+  const releaseAwaiting = () => {
+    if (!entry.counted) return;
+    entry.counted = false;
+    bumpPool(pool, -1);
+  };
+
+  const startTimer = setTimeout(() => {
+    entry.drop(1008, 'start timeout');
+  }, MEDIA_START_TIMEOUT_MS);
+  if (typeof startTimer.unref === 'function') startTimer.unref();
+
+  entry.drop = (code, reason) => {
+    if (entry.dropped || entry.bound) return;
+    entry.dropped = true;
+    clearTimeout(startTimer);
+    forgetUnbound(entry);
+    releaseAwaiting();
+    rejectPrebindSocket(ws, code, reason);
+  };
+
+  entry.counted = true;
+  bumpPool(pool, 1);
+  unboundMediaSockets.push(entry);
 
   ws.on('message', (data) => {
-    if (!data || (typeof data !== 'string' && !Buffer.isBuffer(data))) {
-      console.warn('[twilio] invalid data type on media-stream ws');
+    if (entry.bound) {
+      handleTwilioMessage(session, data);
       return;
     }
+    if (entry.dropped) return;
+
     let msg;
     try {
+      if (!data || (typeof data !== 'string' && !Buffer.isBuffer(data))) {
+        entry.drop(1008, 'start required');
+        return;
+      }
       const text = data.toString();
       if (!text || text.trim() === '') {
-        console.warn('[twilio] empty message on media-stream ws');
+        entry.drop(1008, 'start required');
         return;
       }
       msg = JSON.parse(text);
-    } catch (err) {
-      console.error('[twilio] JSON parse error on media-stream ws:', err.message);
+    } catch {
+      entry.drop(1008, 'start required');
       return;
     }
-    if (!msg || typeof msg !== 'object') {
-      console.warn('[twilio] non-object message on media-stream ws');
-      return;
-    }
-
-    if (msg.event === 'start') {
-      const resolvedSid = msg.start?.callSid;
-      const custom = msg.start?.customParameters || {};
-      const customCallSid = custom.callSid;
-      const customTimestamp = custom.timestamp;
-      const customSignature = custom.signature;
-
-      if (!resolvedSid) {
-        console.error('[twilio] start event missing callSid');
-        ws.close(1008, 'Missing CallSid');
-        return;
-      }
-
-      // Verify custom parameters match URL parameters (defense in depth)
-      if (customCallSid && customCallSid !== callSid) {
-        console.error(`[twilio] callSid mismatch: URL=${callSid} custom=${customCallSid}`);
-        ws.close(1008, 'CallSid parameter mismatch');
-        return;
-      }
-
-      if (customSignature && customSignature !== signature) {
-        console.error(`[twilio] signature mismatch: URL vs custom parameters`);
-        ws.close(1008, 'Signature parameter mismatch');
-        return;
-      }
-
-      if (session.callSid !== resolvedSid) {
-        console.error(`[twilio] CallSid mismatch: expected=${session.callSid} actual=${resolvedSid}`);
-        ws.close(1008, 'CallSid mismatch');
-        return;
-      }
-
-      // Reject duplicate start events after CallSid bind (prevents re-applying custom params)
-      if (boundToCallSid) {
-        console.warn(`[twilio] duplicate start event ignored callSid=${resolvedSid}`);
-        return;
-      }
-
-      // Prevent duplicate active streams for the same CallSid
-      if (session.twilioWs && session.twilioWs !== ws && session.twilioWs.readyState === WebSocket.OPEN) {
-        console.error(`[twilio] duplicate stream rejected for callSid=${resolvedSid} — one active stream per CallSid`);
-        ws.close(1008, 'Duplicate stream');
-        return;
-      }
-
-      pendingByCallSid.delete(resolvedSid);
-      claimedTokens.delete(signature);
-
-      session.twilioWs = ws;
-      session.streamSid = msg.start?.streamSid || msg.streamSid;
-
-      // After CallSid bind, ignore forged custom params (operator set these at /call).
-      // Do NOT overwrite goal/context/voice from potentially forged Twilio stream data.
-
-      boundToCallSid = true;
-      console.log(
-        `[twilio] bound HMAC auth to callSid=${resolvedSid} streamSid=${session.streamSid} style=${session.style || 'support'}`
-      );
-
-      openGrokSession(session);
+    if (!msg || typeof msg !== 'object' || Array.isArray(msg)) {
+      entry.drop(1008, 'start required');
       return;
     }
 
-    if (!boundToCallSid) {
-      console.warn(`[twilio] Received ${msg.event} before callSid binding — buffering not supported`);
+    if (msg.event === 'connected') {
+      if (sawConnected) {
+        entry.drop(1008, 'start required');
+        return;
+      }
+      sawConnected = true;
       return;
     }
 
-    handleTwilioMessage(session, data);
+    if (msg.event !== 'start') {
+      entry.drop(1008, 'start required');
+      return;
+    }
+
+    const result = applyMediaStart(ws, msg);
+    if (!result.ok) {
+      noteMediaStartRejected(result.error);
+      entry.drop(1008, 'media auth failed');
+      return;
+    }
+
+    // Goal, context, and voice stay as the operator set them at /call.
+    session = result.session;
+    signature = result.signature;
+    entry.bound = true;
+    clearTimeout(startTimer);
+    forgetUnbound(entry);
+    releaseAwaiting();
+    pendingByCallSid.delete(session.callSid);
+    claimedTokens.delete(signature);
+    console.log(
+      `[twilio] bound HMAC auth to callSid=${session.callSid} streamSid=${session.streamSid} style=${session.style || 'support'}`
+    );
   });
 
   ws.on('close', () => {
+    clearTimeout(startTimer);
+    forgetUnbound(entry);
+    releaseAwaiting();
+    if (!session) return;
     console.log('[twilio] media-stream closed');
-    if (session) {
-      session.twilioWs = null;
-      if (session.grokWs) {
-        try {
-          session.grokWs.close();
-        } catch {
-          /* ignore */
-        }
-        session.grokWs = null;
+    session.twilioWs = null;
+    if (session.grokWs) {
+      try {
+        session.grokWs.close();
+      } catch {
+        /* ignore */
       }
+      session.grokWs = null;
     }
-    if (signature) {
-      const originalEntry = claimedTokens.get(signature);
-      claimedTokens.delete(signature);
-      // Signature DoS mitigation: restore signature to pending if never bound to CallSid.
-      // This prevents leaked signature connect/disconnect loops from burning the real stream.
-      // Preserve original createdAt so TTL countdown is not reset on burn attempts.
-      if (!boundToCallSid && session) {
-        const originalCreatedAt = originalEntry?.createdAt || Date.now();
-        const entry = { session, createdAt: originalCreatedAt };
-        pendingByToken.set(signature, entry);
-        console.log(`[signature] restored to pending (not bound) callSid=${callSid} preserving original TTL`);
-      }
-    }
-  });
-
-  ws.on('error', (err) => {
-    console.error('[twilio] ws error:', err.message);
   });
 });
 
@@ -1983,7 +2240,20 @@ if (require.main === module) {
 module.exports = {
   app,
   server,
+  buildConnectTwiml,
+  mintMediaAuth,
+  authorizeMediaStart,
+  applyMediaStart,
   createSession,
+  MEDIA_WS_MAX_PAYLOAD,
+  MEDIA_START_TIMEOUT_MS,
+  MAX_AWAITING_MEDIA_SOCKETS,
+  MAX_AWAITING_MEDIA_SOCKETS_PER_CLIENT,
+  MAX_AWAITING_SIGNED_MEDIA_SOCKETS,
+  MAX_AWAITING_SIGNED_MEDIA_SOCKETS_PER_CLIENT,
+  MEDIA_PREBIND_TERMINATE_MS,
+  mediaClientKey,
+  noteUnauthMediaClose,
   maskPhoneNumber,
   maskPhoneNumbersInText,
   isE164,
@@ -1999,5 +2269,6 @@ module.exports = {
   setGrokRealtimeUrlForTests,
   sessionsByCallSid,
   handleTwilioMessage,
+  handleGrokEvent,
   wss,
 };
