@@ -1842,15 +1842,14 @@ wss.on('connection', (ws, req) => {
   });
 });
 
-server.listen(PORT, () => {
-  console.log(`[server] listening on :${PORT}`);
-  console.log(`[server] PUBLIC_HOST=${PUBLIC_HOST || '(not set)'}`);
-  console.log(`[server] media stream wss://${PUBLIC_HOST || 'PUBLIC_HOST'}/media-stream`);
-  console.log(`[server] voice=${XAI_VOICE} model=${XAI_MODEL}`);
-});
-
-// Export for testing
-if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { stripDeliveryTags };
+if (require.main === module) {
+  server.listen(PORT, () => {
+    console.log(`[server] listening on :${PORT}`);
+    console.log(`[server] PUBLIC_HOST=${PUBLIC_HOST || '(not set)'}`);
+    console.log(`[server] media stream wss://${PUBLIC_HOST || 'PUBLIC_HOST'}/media-stream`);
+    console.log(`[server] voice=${XAI_VOICE} model=${XAI_MODEL}`);
+  });
 }
+
+module.exports = { stripDeliveryTags };
 

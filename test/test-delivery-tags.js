@@ -4,6 +4,8 @@
  */
 'use strict';
 
+process.env.BRIDGE_API_KEY = process.env.BRIDGE_API_KEY || 'ci-test-key';
+
 const { stripDeliveryTags } = require('../src/server.js');
 
 const tests = [
