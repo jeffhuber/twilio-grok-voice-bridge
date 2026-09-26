@@ -58,6 +58,31 @@ jobs:
         run: |
           echo "=== Running privacy defaults test ==="
           bash scripts/test-privacy-defaults.sh
+
+      - name: Run steer respond tests
+        env:
+          BRIDGE_API_KEY: ci-test-key
+        run: |
+          echo "=== Running steer respond tests ==="
+          node test/test-steer.js
+
+      - name: Run media secret tests
+        env:
+          BRIDGE_API_KEY: ci-test-key
+        run: |
+          echo "=== Running media secret tests ==="
+          node test/test-media-secret.js
+
+      - name: Run media stream URL tests
+        env:
+          BRIDGE_API_KEY: ci-test-key
+          PUBLIC_HOST: bridge.example.com
+        run: node test/test-media-stream-url.js
+
+      - name: Run connect opener tests
+        env:
+          BRIDGE_API_KEY: ci-test-key
+        run: node test/test-opener-on-connect.js
       
       - name: Run delivery tag stripping test
         env:
