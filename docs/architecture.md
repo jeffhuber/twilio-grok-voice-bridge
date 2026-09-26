@@ -102,6 +102,12 @@ There is **no** auto-style-by-destination-number.
 2. Optional `VOICE_ALIASES` JSON maps aliases to voice ids.
 3. Mid-call switch via `/voice` or callee phrasing matched against alias names.
 
+## Client address for media caps
+
+`CF-Connecting-IP` is trusted only when the TCP peer is loopback (`127.0.0.1` or `::1`). That is safe when cloudflared on this host is the only process connecting from loopback, because cloudflared sets the header from the visitor address. A local forwarder such as ngrok or nginx that accepts `CF-Connecting-IP` from the internet and connects from loopback would let a client spoof the header. Do not put that kind of proxy in front of the bridge. Any non-loopback peer is keyed by its own remote address, and a `CF-Connecting-IP` header on that connection is ignored. IPv6 clients are keyed by the /64 prefix.
+
+A valid `X-Twilio-Signature` is static for this host and does not expire. Signed sockets use a separate pre-bind pool of 8 unbound sockets per client and 128 globally. A leaked signature sent from 16 or more client addresses can fill that global pool. The next signed socket then evicts the oldest unbound signed socket, which can be a Twilio stream that has not sent `start` yet. If the signature leaks, rotate `TWILIO_AUTH_TOKEN`.
+
 ## What not to put in this repo
 
 - Real phone numbers, API keys, `.env` contents, personal coaching scripts.
