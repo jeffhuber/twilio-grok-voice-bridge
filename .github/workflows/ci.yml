@@ -47,6 +47,13 @@ jobs:
         run: |
           echo "=== Running privacy defaults test ==="
           bash scripts/test-privacy-defaults.sh
+
+      - name: Run media secret tests
+        env:
+          BRIDGE_API_KEY: ci-test-key
+        run: |
+          echo "=== Running media secret tests ==="
+          node test/test-media-secret.js
       
       - name: Run body-parser safety test
         env:

@@ -290,6 +290,17 @@ if (!TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN || !TWILIO_FROM_NUMBER) {
 if (!XAI_API_KEY) {
   console.warn('[warn] XAI_API_KEY missing — media-stream bridge will fail until set');
 }
+/** Dedicated media HMAC key, or the operator key when the dedicated key is unset. */
+function mediaAuthSecret() {
+  const dedicated = String(process.env.MEDIA_STREAM_SECRET || '').trim();
+  if (dedicated) return dedicated;
+  return process.env.BRIDGE_API_KEY || '';
+}
+
+function mediaAuthUsesDedicatedSecret() {
+  return Boolean(String(process.env.MEDIA_STREAM_SECRET || '').trim());
+}
+
 if (!BRIDGE_API_KEY && !ALLOW_UNAUTHENTICATED_OPERATOR) {
   console.error('[error] BRIDGE_API_KEY is not set and ALLOW_UNAUTHENTICATED_OPERATOR is not enabled.');
   console.error('[error] For shared/public deployments, BRIDGE_API_KEY is required to protect operator routes.');
@@ -300,7 +311,11 @@ if (!BRIDGE_API_KEY && ALLOW_UNAUTHENTICATED_OPERATOR) {
   console.warn('');
   console.warn('[SECURITY WARNING] ALLOW_UNAUTHENTICATED_OPERATOR=1 is set WITHOUT BRIDGE_API_KEY!');
   console.warn('[SECURITY WARNING] Operator control-plane routes (/call, /steer, /hangup, /voice, /transcript) are UNPROTECTED.');
-  console.warn('[SECURITY WARNING] Media stream HMAC authentication is UNAVAILABLE — signature minting will fail and calls will break.');
+  if (!mediaAuthSecret()) {
+    console.warn('[SECURITY WARNING] Media stream HMAC authentication is UNAVAILABLE — signature minting will fail and calls will break.');
+  } else {
+    console.warn('[SECURITY WARNING] Media stream HMAC is using MEDIA_STREAM_SECRET. Operator routes are still unprotected.');
+  }
   console.warn('[SECURITY WARNING] Anyone who can reach this host can spend your Twilio account and xAI credits.');
   console.warn('[SECURITY WARNING] This mode is ONLY for localhost demos. Use BRIDGE_API_KEY for any shared/public deployment.');
   console.warn('');
@@ -327,13 +342,12 @@ const MEDIA_AUTH_WINDOW_MS = Number(process.env.MEDIA_AUTH_WINDOW_MS || 120000);
  * Signature is HMAC-SHA256(secret, callSid:timestamp)
  */
 function generateMediaAuthSignature(callSid, timestamp) {
-  if (!BRIDGE_API_KEY) {
-    throw new Error('BRIDGE_API_KEY required for HMAC media auth');
+  const secret = mediaAuthSecret();
+  if (!secret) {
+    throw new Error('MEDIA_STREAM_SECRET or BRIDGE_API_KEY required for HMAC media auth');
   }
   const message = `${callSid}:${timestamp}`;
-  const hmac = crypto.createHmac('sha256', BRIDGE_API_KEY);
-  hmac.update(message);
-  return hmac.digest('base64url');
+  return crypto.createHmac('sha256', secret).update(message, 'utf8').digest('base64url');
 }
 
 /**
@@ -341,8 +355,8 @@ function generateMediaAuthSignature(callSid, timestamp) {
  * Returns { valid: boolean, error?: string }
  */
 function verifyMediaAuthSignature(callSid, timestamp, signature) {
-  if (!BRIDGE_API_KEY) {
-    return { valid: false, error: 'BRIDGE_API_KEY not configured' };
+  if (!mediaAuthSecret()) {
+    return { valid: false, error: 'media auth secret not configured' };
   }
   
   const now = Date.now();
@@ -1321,7 +1335,8 @@ app.get('/health', (_req, res) => {
     styles: Object.keys(STYLE_PROFILES),
     contactConfigured: Boolean(getContact().fullName || getContact().mobile),
     authRequired: Boolean(BRIDGE_API_KEY),
-    hmacAuth: true,
+    hmacAuth: Boolean(mediaAuthSecret()),
+    mediaAuthDedicated: mediaAuthUsesDedicatedSecret(),
   });
 });
 
@@ -1815,9 +1830,18 @@ wss.on('connection', (ws, req) => {
   });
 });
 
-server.listen(PORT, () => {
-  console.log(`[server] listening on :${PORT}`);
-  console.log(`[server] PUBLIC_HOST=${PUBLIC_HOST || '(not set)'}`);
-  console.log(`[server] media stream wss://${PUBLIC_HOST || 'PUBLIC_HOST'}/media-stream`);
-  console.log(`[server] voice=${XAI_VOICE} model=${XAI_MODEL}`);
-});
+if (require.main === module) {
+  server.listen(PORT, () => {
+    console.log(`[server] listening on :${PORT}`);
+    console.log(`[server] PUBLIC_HOST=${PUBLIC_HOST || '(not set)'}`);
+    console.log(`[server] media stream wss://${PUBLIC_HOST || 'PUBLIC_HOST'}/media-stream`);
+    console.log(`[server] voice=${XAI_VOICE} model=${XAI_MODEL}`);
+  });
+}
+
+module.exports = {
+  app,
+  generateMediaAuthSignature,
+  verifyMediaAuthSignature,
+  mediaAuthSecret,
+};
