@@ -21,8 +21,13 @@ const tests = [
   { input: 'This [bracket text] should stay', expected: { text: 'This [bracket text] should stay', count: 0 }, desc: 'Non-delivery brackets preserved' },
   { input: '', expected: { text: '', count: 0 }, desc: 'Empty string' },
   { input: '[pause][breath][sigh]', expected: { text: '', count: 3 }, desc: 'Only tags, no content' },
-  { input: 'Hello  [pause]  there  [breath]  friend', expected: { text: 'Hello there friend', count: 2 }, desc: 'Whitespace collapse' },
-  { input: '  [pause]  spaced  [breath]  ', expected: { text: 'spaced', count: 2 }, desc: 'Leading/trailing spaces with tags' }
+  { input: 'Hello  [pause]  there  [breath]  friend', expected: { text: 'Hello there friend', count: 2 }, desc: 'Horizontal whitespace collapse' },
+  { input: '  [pause]  spaced  [breath]  ', expected: { text: 'spaced', count: 2 }, desc: 'Leading/trailing spaces with tags' },
+  { input: 'Sure [pause], ok', expected: { text: 'Sure, ok', count: 1 }, desc: 'Tag before punctuation does not leave a space' },
+  { input: 'Sure [pause] , ok', expected: { text: 'Sure, ok', count: 1 }, desc: 'Space between tag and punctuation is removed' },
+  { input: 'Hello\n[pause]\nthere', expected: { text: 'Hello\n\nthere', count: 1 }, desc: 'Newlines are not flattened' },
+  { input: 'line one\n\nline two', expected: { text: 'line one\n\nline two', count: 0 }, desc: 'Newlines without tags stay put' },
+  { input: 'Sure , ok', expected: { text: 'Sure , ok', count: 0 }, desc: 'Untagged space before punctuation stays' }
 ];
 
 let passed = 0;
