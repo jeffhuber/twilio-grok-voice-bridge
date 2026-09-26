@@ -43,7 +43,7 @@ function loadModule(raw) {
 }
 
 function timeoutWarns(warns) {
-  return warns.filter((line) => line.includes('NEVER_CONNECTED_TIMEOUT_MS') && line.includes('at least 1000'));
+  return warns.filter((line) => line.includes('NEVER_CONNECTED_TIMEOUT_MS') && line.includes('at least 60000'));
 }
 
 function startMessage(callSid, timestamp, signature) {
@@ -90,7 +90,7 @@ async function waitUntil(predicate, ms) {
 }
 
 async function main() {
-  for (const raw of ['NaN', '-5', '0', '999', 'Infinity']) {
+  for (const raw of ['NaN', '-5', '0', '999', '1000', '15000', '59999', 'Infinity']) {
     const loaded = loadModule(raw);
     const warned = timeoutWarns(loaded.warns);
     if (loaded.mod.NEVER_CONNECTED_TIMEOUT_MS === 600000 && warned.length === 1) {
@@ -102,18 +102,18 @@ async function main() {
     }
   }
 
-  const kept = loadModule('15000');
-  if (kept.mod.NEVER_CONNECTED_TIMEOUT_MS === 15000 && timeoutWarns(kept.warns).length === 0) {
-    pass('a positive integer timeout is kept');
+  const keptFloor = loadModule('60000');
+  if (keptFloor.mod.NEVER_CONNECTED_TIMEOUT_MS === 60000 && timeoutWarns(keptFloor.warns).length === 0) {
+    pass('a 60000ms timeout is kept');
   } else {
-    fail(`positive integer timeout became ${kept.mod.NEVER_CONNECTED_TIMEOUT_MS}`);
+    fail(`60000ms timeout became ${keptFloor.mod.NEVER_CONNECTED_TIMEOUT_MS}`);
   }
 
-  const floor = loadModule('1000');
-  if (floor.mod.NEVER_CONNECTED_TIMEOUT_MS === 1000 && timeoutWarns(floor.warns).length === 0) {
-    pass('a 1000ms timeout is kept');
+  const kept = loadModule('120000');
+  if (kept.mod.NEVER_CONNECTED_TIMEOUT_MS === 120000 && timeoutWarns(kept.warns).length === 0) {
+    pass('an integer at or above 60000 is kept');
   } else {
-    fail(`1000ms timeout became ${floor.mod.NEVER_CONNECTED_TIMEOUT_MS}`);
+    fail(`positive integer timeout became ${kept.mod.NEVER_CONNECTED_TIMEOUT_MS}`);
   }
 
   const { mod } = loadModule(undefined);

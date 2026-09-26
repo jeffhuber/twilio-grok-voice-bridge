@@ -494,9 +494,9 @@ const NEVER_CONNECTED_TIMEOUT_DEFAULT_MS = 600000;
 function readNeverConnectedTimeout(raw = process.env.NEVER_CONNECTED_TIMEOUT_MS) {
   if (raw === undefined || raw === '') return NEVER_CONNECTED_TIMEOUT_DEFAULT_MS;
   const value = Number(raw);
-  if (!Number.isFinite(value) || !Number.isInteger(value) || value < 1000) {
+  if (!Number.isFinite(value) || !Number.isInteger(value) || value < 60000) {
     console.warn(
-      `[warn] NEVER_CONNECTED_TIMEOUT_MS=${raw} must be an integer of at least 1000; using ${NEVER_CONNECTED_TIMEOUT_DEFAULT_MS}`
+      `[warn] NEVER_CONNECTED_TIMEOUT_MS=${raw} must be an integer of at least 60000; using ${NEVER_CONNECTED_TIMEOUT_DEFAULT_MS}`
     );
     return NEVER_CONNECTED_TIMEOUT_DEFAULT_MS;
   }
