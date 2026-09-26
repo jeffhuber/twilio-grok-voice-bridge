@@ -1679,8 +1679,21 @@ app.post('/hangup', requireBridgeAuth, async (req, res) => {
   res.json({ ok: true, callSid: session.callSid });
 });
 
+const MEDIA_WS_MAX_PAYLOAD = 64 * 1024;
+const MEDIA_START_TIMEOUT_MS = 5000;
+const MAX_AWAITING_MEDIA_SOCKETS = 32;
+
 const server = http.createServer(app);
-const wss = new WebSocket.Server({ noServer: true });
+const wss = new WebSocket.Server({ noServer: true, maxPayload: MEDIA_WS_MAX_PAYLOAD });
+let awaitingMediaStarts = 0;
+let lastUnauthMediaLogAt = 0;
+
+function noteUnauthMediaClose() {
+  const now = Date.now();
+  if (now - lastUnauthMediaLogAt < 1000) return;
+  lastUnauthMediaLogAt = now;
+  console.warn('[twilio] closed media socket before a bound start');
+}
 
 server.on('upgrade', (req, socket, head) => {
   // Auth is not in the URL. Twilio error 31920 rejects <Stream url> query strings.
@@ -1695,93 +1708,114 @@ server.on('upgrade', (req, socket, head) => {
 });
 
 wss.on('connection', (ws) => {
-  console.log('[twilio] media-stream websocket connected');
+  // The upgrade is unauthenticated. Twilio sends one "connected" event, then "start".
+  if (awaitingMediaStarts >= MAX_AWAITING_MEDIA_SOCKETS) {
+    ws.close(1008, 'too many pending streams');
+    return;
+  }
+  awaitingMediaStarts += 1;
 
   /** @type {CallSession|null} */
   let session = null;
   let signature = '';
   let boundToCallSid = false;
+  let sawConnected = false;
+  let released = false;
+
+  const releaseAwaiting = () => {
+    if (released) return;
+    released = true;
+    awaitingMediaStarts -= 1;
+  };
+
+  const startTimer = setTimeout(() => {
+    if (!boundToCallSid) {
+      noteUnauthMediaClose();
+      ws.close(1008, 'start timeout');
+    }
+  }, MEDIA_START_TIMEOUT_MS);
+
+  const closeBeforeStart = () => {
+    clearTimeout(startTimer);
+    noteUnauthMediaClose();
+    ws.close(1008, 'start required');
+  };
 
   ws.on('message', (data) => {
-    if (!data || (typeof data !== 'string' && !Buffer.isBuffer(data))) {
-      console.warn('[twilio] invalid data type on media-stream ws');
+    if (boundToCallSid) {
+      handleTwilioMessage(session, data);
       return;
     }
+
     let msg;
     try {
+      if (!data || (typeof data !== 'string' && !Buffer.isBuffer(data))) {
+        closeBeforeStart();
+        return;
+      }
       const text = data.toString();
       if (!text || text.trim() === '') {
-        console.warn('[twilio] empty message on media-stream ws');
+        closeBeforeStart();
         return;
       }
       msg = JSON.parse(text);
-    } catch (err) {
-      console.error('[twilio] JSON parse error on media-stream ws:', err.message);
+    } catch {
+      closeBeforeStart();
       return;
     }
-    if (!msg || typeof msg !== 'object') {
-      console.warn('[twilio] non-object message on media-stream ws');
+    if (!msg || typeof msg !== 'object' || Array.isArray(msg)) {
+      closeBeforeStart();
       return;
     }
 
-    if (msg.event === 'start') {
-      if (boundToCallSid) {
-        console.warn(`[twilio] duplicate start event ignored callSid=${session && session.callSid}`);
+    if (msg.event === 'connected') {
+      if (sawConnected) {
+        closeBeforeStart();
         return;
       }
-
-      const result = applyMediaStart(ws, msg);
-      if (!result.ok) {
-        console.error(`[twilio] media start rejected: ${result.error}`);
-        ws.close(1008, 'media auth failed');
-        return;
-      }
-
-      // Goal, context, and voice stay as the operator set them at /call.
-      session = result.session;
-      signature = result.signature;
-      boundToCallSid = true;
-      pendingByCallSid.delete(session.callSid);
-      claimedTokens.delete(signature);
-      console.log(
-        `[twilio] bound HMAC auth to callSid=${session.callSid} streamSid=${session.streamSid} style=${session.style || 'support'}`
-      );
+      sawConnected = true;
       return;
     }
 
-    if (!boundToCallSid) {
-      console.warn(`[twilio] Received ${msg.event} before callSid binding — buffering not supported`);
+    if (msg.event !== 'start') {
+      closeBeforeStart();
       return;
     }
 
-    handleTwilioMessage(session, data);
+    const result = applyMediaStart(ws, msg);
+    if (!result.ok) {
+      console.error(`[twilio] media start rejected: ${result.error}`);
+      clearTimeout(startTimer);
+      ws.close(1008, 'media auth failed');
+      return;
+    }
+
+    // Goal, context, and voice stay as the operator set them at /call.
+    session = result.session;
+    signature = result.signature;
+    boundToCallSid = true;
+    clearTimeout(startTimer);
+    releaseAwaiting();
+    pendingByCallSid.delete(session.callSid);
+    claimedTokens.delete(signature);
+    console.log(
+      `[twilio] bound HMAC auth to callSid=${session.callSid} streamSid=${session.streamSid} style=${session.style || 'support'}`
+    );
   });
 
   ws.on('close', () => {
+    clearTimeout(startTimer);
+    releaseAwaiting();
+    if (!session) return;
     console.log('[twilio] media-stream closed');
-    if (session) {
-      session.twilioWs = null;
-      if (session.grokWs) {
-        try {
-          session.grokWs.close();
-        } catch {
-          /* ignore */
-        }
-        session.grokWs = null;
+    session.twilioWs = null;
+    if (session.grokWs) {
+      try {
+        session.grokWs.close();
+      } catch {
+        /* ignore */
       }
-    }
-    if (signature) {
-      const originalEntry = claimedTokens.get(signature);
-      claimedTokens.delete(signature);
-      // Signature DoS mitigation: restore signature to pending if never bound to CallSid.
-      // This prevents leaked signature connect/disconnect loops from burning the real stream.
-      // Preserve original createdAt so TTL countdown is not reset on burn attempts.
-      if (!boundToCallSid && session) {
-        const originalCreatedAt = originalEntry?.createdAt || Date.now();
-        const entry = { session, createdAt: originalCreatedAt };
-        pendingByToken.set(signature, entry);
-        console.log(`[signature] restored to pending (not bound) callSid=${session.callSid} preserving original TTL`);
-      }
+      session.grokWs = null;
     }
   });
 
@@ -1801,9 +1835,13 @@ if (require.main === module) {
 
 module.exports = {
   app,
+  server,
   buildConnectTwiml,
   mintMediaAuth,
   authorizeMediaStart,
   applyMediaStart,
   createSession,
+  MEDIA_WS_MAX_PAYLOAD,
+  MEDIA_START_TIMEOUT_MS,
+  MAX_AWAITING_MEDIA_SOCKETS,
 };

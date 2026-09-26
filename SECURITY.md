@@ -30,7 +30,7 @@ All control-plane routes (`/call`, `/steer`, `/hangup`, `/voice`, `/transcript`)
 **Single-use claim:**
 - Signatures can only be claimed once; a second start with the same signature is rejected and the socket is closed
 - CallSid binding: `start.callSid` must match the signed parameter; mismatches close the WebSocket
-- Signature DoS mitigation: unclaimed signatures are restored to pending with preserved TTL to prevent burn loops
+- The socket is unauthenticated until `start`. Frames are capped at 64 KiB, waiting sockets are capped, a non-start frame other than one `connected` event closes the socket, and a missing `start` closes it after 5 seconds. A consumed signature is not put back
 
 ### 3. Session Lifecycle Management
 
@@ -107,18 +107,16 @@ Use `.env` (gitignored) or secret management systems for deployments.
 
 **Within-TTL attacks (LOW-MEDIUM impact):**
 
-*Scenario 1: Stolen TwiML parameters + forged start event*
-- The `<Stream url>` has no query string (Twilio error 31920). `callSid`, `timestamp`, and `signature` are `<Parameter>` values on the start message.
-- If an attacker captures those parameters and opens `/media-stream`
-- AND sends a `start` event whose `start.callSid` and `start.customParameters` match
-- The attacker can bind to the session within `MEDIA_AUTH_WINDOW_MS` (default 2 minutes)
-- **Impact:** Single connection to xAI Realtime for that specific CallSid
+*Scenario 1: Captured TwiML parameters racing the real stream*
+- The `<Stream url>` has no query string (Twilio error 31920). `callSid`, `timestamp`, and `signature` are `<Parameter>` values. The WebSocket is unauthenticated until `start`, so those captured parameters are enough to open `/media-stream` and send `start` before Twilio does.
+- If `start.callSid` and `start.customParameters` match the pending session, the attacker binds that CallSid
+- **Impact:** That caller can take the single stream for that CallSid until the signature expires (`MEDIA_AUTH_WINDOW_MS`, default 2 minutes)
 - **Mitigations:**
-  - Single-use claim (a second start with the same signature is rejected)
+  - The signature is removed from the pending set when `start` is accepted, so a second socket cannot bind with it
   - Short TTL (default 2 minutes)
   - Signature tied to specific CallSid (cannot transfer to other calls)
-  - Upgrade does not authenticate from the query string, so a query string cannot bypass the start-event check
-  - DoS mitigation: a claimed signature that closes before bind is restored for the legitimate start
+  - Upgrade does not read auth from the query string
+  - Waiting sockets, frame size, and the time before `start` are capped so an unbound socket cannot sit open or push a large frame
 
 *Scenario 2: `/twiml-connect` sessionId leak*
 - If `sessionId` query parameter is leaked before Twilio fetches TwiML
