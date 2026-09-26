@@ -56,7 +56,11 @@ Returns `callSid`, `style`, `voice`, etc.
 
 ### POST /steer
 
-Body: `{ "callSid": "...", "text": "operator coaching" }` — updates instructions mid-call without announcing coaching.
+Body: `{ "callSid": "...", "text": "operator coaching", "respond": false }`
+
+Updates instructions mid-call without announcing coaching. Each request replaces the previous operator coaching: instructions are rebuilt from the call goal, context, and style, then the new text is appended. Earlier `/steer` text is not kept.
+
+`respond` is optional. Omit it or set JSON `true` to force a model response (the default). Set JSON `false` to update instructions only, with no `response.create`. Any other JSON value, including the string `"false"`, `0`, or `null`, is rejected with 400.
 
 ### POST /hangup
 
