@@ -16,7 +16,7 @@ Content-Type: application/json
 Authorization: Bearer <BRIDGE_API_KEY>
 
 {
-  "to": "+15551234567",
+  "to": "+15555550100",
   "goal": "Book a table for 2 tonight at 7pm, patio if available",
   "style": "restaurant-book",
   "voice": "ara"
@@ -25,12 +25,16 @@ Authorization: Bearer <BRIDGE_API_KEY>
 
 ## POST /steer
 
+Each call replaces prior operator coaching. Instructions are rebuilt from the call goal, context, and style; earlier steer text is not accumulated.
+
+`respond` defaults to true. `false` updates instructions and does not force a reply. Only a JSON boolean is accepted.
+
 ```
 POST {BRIDGE}/steer
 Content-Type: application/json
 Authorization: Bearer <BRIDGE_API_KEY>
 
-{ "callSid": "CAxxxx", "text": "Ask for booth seating instead of patio." }
+{ "callSid": "call-1", "text": "Ask for booth seating instead of patio.", "respond": false }
 ```
 
 ## POST /hangup

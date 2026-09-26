@@ -40,19 +40,49 @@ jobs:
       - name: Syntax check shell scripts
         run: |
           echo "=== Checking shell script syntax with bash -n ==="
-          find scripts -name "*.sh" -type f -exec bash -n {} \;
+          find scripts ops -name "*.sh" -type f -exec bash -n {} \;
           echo "✓ All shell scripts passed syntax check"
+
+      - name: Shellcheck ops scripts
+        run: |
+          if ! command -v shellcheck >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y shellcheck
+          fi
+          shellcheck -x -P SCRIPTDIR ops/*.sh test/test-ops.sh
+
+      - name: Run ops script tests
+        run: bash test/test-ops.sh
       
       - name: Run privacy defaults test
         run: |
           echo "=== Running privacy defaults test ==="
           bash scripts/test-privacy-defaults.sh
 
+      - name: Run steer respond tests
+        env:
+          BRIDGE_API_KEY: ci-test-key
+        run: |
+          echo "=== Running steer respond tests ==="
+          node test/test-steer.js
+
+      - name: Run media secret tests
+        env:
+          BRIDGE_API_KEY: ci-test-key
+        run: |
+          echo "=== Running media secret tests ==="
+          node test/test-media-secret.js
+
       - name: Run media stream URL tests
         env:
           BRIDGE_API_KEY: ci-test-key
           PUBLIC_HOST: bridge.example.com
         run: node test/test-media-stream-url.js
+
+      - name: Run connect opener tests
+        env:
+          BRIDGE_API_KEY: ci-test-key
+        run: node test/test-opener-on-connect.js
       
       - name: Run delivery tag stripping test
         env:
