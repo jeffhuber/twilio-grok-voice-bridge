@@ -220,6 +220,24 @@ async function main() {
   } else {
     fail(`non-phone numbers were masked: ${kept}`);
   }
+  const glued = maskPhoneNumbersInText('2026-09-26 198.51.100.10');
+  if (glued === '2026-09-26 198.51.100.10') {
+    pass('a date and an IPv4 address separated by a space both stay');
+  } else {
+    fail(`glued date and address were masked: ${glued}`);
+  }
+  const leadingIp = maskPhoneNumbersInText('198.51.100.10 is documentation');
+  if (leadingIp === '198.51.100.10 is documentation') {
+    pass('an IPv4 address at the start of a string stays');
+  } else {
+    fail(`leading address was masked: ${leadingIp}`);
+  }
+  const leadingZeros = maskPhoneNumbersInText('saw 044.123.45.67 today');
+  if (!leadingZeros.includes('044.123.45.67') && !leadingZeros.includes('044') && leadingZeros.includes('5.67')) {
+    pass('a leading-zero dotted quad is masked');
+  } else {
+    fail(`leading-zero quad was kept: ${leadingZeros}`);
+  }
   const epochEdge = maskPhoneNumbersInText('at 1000000000000 and 2100000000000 then 2100000000001');
   if (
     !epochEdge.includes('1000000000000') &&
@@ -534,8 +552,14 @@ async function main() {
       await new Promise((resolve) => grokHttp.listen(0, '127.0.0.1', resolve));
       setGrokRealtimeUrlForTests(`ws://127.0.0.1:${grokHttp.address().port}`);
       try {
+        const xmlParam = (name) => {
+          const named = new RegExp(`<Parameter[^>]*name="${name}"[^>]*value="([^"]*)"`);
+          const valued = new RegExp(`<Parameter[^>]*value="([^"]*)"[^>]*name="${name}"`);
+          const match = twimlOk.raw.match(named) || twimlOk.raw.match(valued);
+          return match ? match[1].replace(/&amp;/g, '&') : '';
+        };
         const streamUrl = new URL(urlMatch[1].replace(/&amp;/g, '&'));
-        const mediaUrl = `ws://127.0.0.1:${port}${streamUrl.pathname}${streamUrl.search}`;
+        const mediaUrl = `ws://127.0.0.1:${port}${streamUrl.pathname}`;
         const mediaSock = await new Promise((resolve, reject) => {
           const sock = new WebSocket(mediaUrl);
           const timer = setTimeout(() => {
@@ -567,7 +591,15 @@ async function main() {
         mediaSock.send(JSON.stringify({
           event: 'start',
           streamSid: 'stream-mask',
-          start: { callSid: 'CA-mask-path', streamSid: 'stream-mask' },
+          start: {
+            callSid: 'CA-mask-path',
+            streamSid: 'stream-mask',
+            customParameters: {
+              callSid: xmlParam('callSid'),
+              timestamp: xmlParam('timestamp'),
+              signature: xmlParam('signature'),
+            },
+          },
         }));
         const grokLogs = await waitForLog(stderr, beforeInner, '[grok] JSON parse error callSid=', 2000);
         if (
@@ -597,6 +629,8 @@ async function main() {
           if (!grokPeer) {
             fail('grok peer was not connected');
           } else {
+            placedSession.awaitingAudioConfigAck = true;
+            placedSession.openerSent = false;
             const beforeServerErr = stderr.lines.length;
             grokPeer.send(JSON.stringify({ type: 'error', error: { message: 'upstream +4930000000000' } }));
             const serverErrLogs = await waitForLog(stderr, beforeServerErr, '[grok] server error:', 2000);
@@ -608,6 +642,13 @@ async function main() {
               pass('grok server errors mask numbers in the event payload');
             } else {
               fail(`grok server error log ${JSON.stringify(serverErrLogs)}`);
+            }
+            if (placedSession.awaitingAudioConfigAck === false && placedSession.openerSent === false) {
+              pass('grok server error clears the opener arm');
+            } else {
+              fail(
+                `opener arm after masked server error ack=${placedSession.awaitingAudioConfigAck} sent=${placedSession.openerSent}`
+              );
             }
           }
         }
@@ -628,37 +669,38 @@ async function main() {
           .createHmac('sha256', process.env.BRIDGE_API_KEY)
           .update(`CA-sig:${sigTs}`)
           .digest('base64url');
+        await delay(1100);
         const beforeSig = stderr.lines.length;
-        await Promise.race([
-          new Promise((resolve) => {
-          const req = http.request(
-            {
-              host: '127.0.0.1',
-              port,
-              path: `/media-stream?callSid=CA-sig&timestamp=${sigTs}&signature=${encodeURIComponent(sig)}`,
-              headers: {
-                connection: 'Upgrade',
-                upgrade: 'websocket',
-                'sec-websocket-key': crypto.randomBytes(16).toString('base64'),
-                'sec-websocket-version': '13',
-              },
-            },
-            (res) => {
-              res.resume();
-              res.on('end', resolve);
-            }
-          );
-          req.on('upgrade', (res, socket) => {
-            socket.destroy();
-            resolve();
+        const sigSock = await new Promise((resolve, reject) => {
+          const sock = new WebSocket(`ws://127.0.0.1:${port}/media-stream`);
+          const timer = setTimeout(() => {
+            sock.terminate();
+            reject(new Error('signature socket open timed out'));
+          }, 2000);
+          sock.on('open', () => {
+            clearTimeout(timer);
+            resolve(sock);
           });
-          req.on('error', resolve);
-          req.end();
-        }),
-          delay(2000),
-        ]);
-        await delay(50);
-        const sigLogs = stderr.lines.slice(beforeSig).filter((line) => line.includes('signature verification failed'));
+          sock.on('error', (err) => {
+            clearTimeout(timer);
+            reject(err);
+          });
+        });
+        sigSock.send(JSON.stringify({
+          event: 'start',
+          streamSid: 'stream-sig',
+          start: {
+            callSid: 'CA-sig',
+            streamSid: 'stream-sig',
+            customParameters: {
+              callSid: 'CA-sig',
+              timestamp: String(sigTs),
+              signature: sig,
+            },
+          },
+        }));
+        const sigLogs = await waitForLog(stderr, beforeSig, 'signature verification failed', 2000);
+        sigSock.close();
         if (
           sigLogs.length === 1 &&
           !sigLogs[0].includes('+8613800000000') &&
