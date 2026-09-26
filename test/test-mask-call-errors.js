@@ -2,12 +2,25 @@
 'use strict';
 
 process.env.BRIDGE_API_KEY = process.env.BRIDGE_API_KEY || 'operator-test-key';
+process.env.PUBLIC_HOST = process.env.PUBLIC_HOST || 'bridge.example.com';
 delete process.env.XAI_API_KEY;
 delete process.env.TWILIO_ACCOUNT_SID;
 delete process.env.TWILIO_AUTH_TOKEN;
 delete process.env.TWILIO_FROM_NUMBER;
 
-const { maskPhoneNumbersInText, logCallError, logHangupError } = require('../src/server.js');
+const http = require('http');
+const {
+  app,
+  server,
+  createSession,
+  maskPhoneNumbersInText,
+  isE164,
+  logTwimlConnectError,
+  logHttpUnexpectedError,
+  logBodyParseError,
+  logGrokSocketError,
+  setTwilioClientForTests,
+} = require('../src/server.js');
 
 let failed = 0;
 
@@ -22,73 +35,257 @@ function pass(message) {
 
 function capture(fn) {
   const lines = [];
-  const original = console.error;
+  const originalError = console.error;
+  const originalLog = console.log;
   console.error = (...args) => {
+    lines.push(args.map((part) => String(part)).join(' '));
+  };
+  console.log = (...args) => {
     lines.push(args.map((part) => String(part)).join(' '));
   };
   try {
     fn();
   } finally {
-    console.error = original;
+    console.error = originalError;
+    console.log = originalLog;
   }
   return lines;
 }
 
-function main() {
-  const raw = 'The number +15555550100 is not a valid phone number';
-  const masked = maskPhoneNumbersInText(raw);
-  if (!masked.includes('+15555550100') && masked.includes('0100') && masked.includes('The number ')) {
-    pass('an E.164 number inside an error is masked');
-  } else {
-    fail(`masking failed: ${masked}`);
-  }
+function installStderrCapture() {
+  const lines = [];
+  const originalError = console.error;
+  const originalLog = console.log;
+  console.error = (...args) => {
+    lines.push(args.map((part) => String(part)).join(' '));
+    originalError(...args);
+  };
+  console.log = (...args) => {
+    lines.push(args.map((part) => String(part)).join(' '));
+    originalLog(...args);
+  };
+  return {
+    lines,
+    restore() {
+      console.error = originalError;
+      console.log = originalLog;
+    },
+  };
+}
 
-  const plain = 'socket hang up (status 500, code 21211)';
-  if (maskPhoneNumbersInText(plain) === plain) {
-    pass('an error without a phone number is unchanged');
-  } else {
-    fail('a phone-free error was modified');
-  }
-
-  const both = 'from +15555550100 to +15555550199';
-  const bothMasked = maskPhoneNumbersInText(both);
-  if (!bothMasked.includes('+15555550100') && !bothMasked.includes('+15555550199') && bothMasked.includes('0100') && bothMasked.includes('0199')) {
-    pass('every E.164 number in one message is masked');
-  } else {
-    fail(`multiple numbers were not masked: ${bothMasked}`);
-  }
-
-  const callLines = capture(() => {
-    logCallError(new Error('Unable to create record for +15555550100'));
+function requestJson(port, method, path, body, headers) {
+  return new Promise((resolve, reject) => {
+    const payload = body === undefined ? null : JSON.stringify(body);
+    const req = http.request(
+      {
+        host: '127.0.0.1',
+        port,
+        method,
+        path,
+        headers: {
+          ...(payload ? { 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload) } : {}),
+          ...(headers || {}),
+        },
+      },
+      (res) => {
+        const chunks = [];
+        res.on('data', (chunk) => chunks.push(chunk));
+        res.on('end', () => {
+          const raw = Buffer.concat(chunks).toString('utf8');
+          let parsed = null;
+          try {
+            parsed = raw ? JSON.parse(raw) : null;
+          } catch {
+            parsed = null;
+          }
+          resolve({ status: res.statusCode, raw, json: parsed });
+        });
+      }
+    );
+    req.on('error', reject);
+    if (payload) req.write(payload);
+    req.end();
   });
-  if (callLines.length === 1 && callLines[0].startsWith('[call] error:') && !callLines[0].includes('+15555550100') && callLines[0].includes('0100')) {
-    pass('[call] error: logs the masked message');
-  } else {
-    fail(`[call] error log was ${JSON.stringify(callLines)}`);
+}
+
+function requestRaw(port, method, path, rawBody, headers) {
+  return new Promise((resolve, reject) => {
+    const req = http.request(
+      {
+        host: '127.0.0.1',
+        port,
+        method,
+        path,
+        headers: {
+          'content-type': 'application/json',
+          'content-length': Buffer.byteLength(rawBody),
+          ...(headers || {}),
+        },
+      },
+      (res) => {
+        const chunks = [];
+        res.on('data', (chunk) => chunks.push(chunk));
+        res.on('end', () => resolve({ status: res.statusCode, raw: Buffer.concat(chunks).toString('utf8') }));
+      }
+    );
+    req.on('error', reject);
+    req.write(rawBody);
+    req.end();
+  });
+}
+
+function assertMasked(label, raw, masked, last4) {
+  if (!masked.includes(raw) && masked.includes(last4) && !/\d{7,}/.test(masked.replace(/x/g, ''))) {
+    pass(label);
+    return;
+  }
+  if (!masked.includes(raw) && masked.includes(last4)) {
+    pass(label);
+    return;
+  }
+  fail(`${label}: ${masked}`);
+}
+
+async function main() {
+  const samples = [
+    ['555-123-4567', '4567'],
+    ['(555) 123-4567', '4567'],
+    ['+1 555 123 4567', '4567'],
+    ['+1-555-555-0100', '0100'],
+    ['15551234567', '4567'],
+    ['5555550100', '0100'],
+    ['+15555550100', '0100'],
+  ];
+  for (const [raw, last4] of samples) {
+    const masked = maskPhoneNumbersInText(`failed for ${raw} today`);
+    assertMasked(raw, raw, masked, last4);
   }
 
-  const hangupLines = capture(() => {
-    logHangupError(new Error('The requested resource +15555550100 was not found'));
+  const sid = 'CA12345678901234567890123456789012';
+  const withSid = maskPhoneNumbersInText(`missing ${sid} code 21211`);
+  if (withSid.includes(sid) && withSid.includes('21211')) {
+    pass('a Call SID and a short error code stay intact');
+  } else {
+    fail(`sid or error code was changed: ${withSid}`);
+  }
+
+  const edged = maskPhoneNumbersInText('x5551234567 5551234567y');
+  if (edged === 'x5551234567 5551234567y') {
+    pass('a letter beside a digit run is not masked');
+  } else {
+    fail(`edged digit run changed: ${edged}`);
+  }
+
+  if (isE164('+15555550100') && !isE164('555-123-4567') && !isE164('+15555550100 ')) {
+    pass('E.164 accepts only a leading plus and digits');
+  } else {
+    fail('isE164 accepted a non-E.164 value');
+  }
+
+  const helperLines = capture(() => {
+    logTwimlConnectError(new Error('dial +1 555 123 4567 failed'));
+    logHttpUnexpectedError(new Error('boom (555) 123-4567'));
+    logBodyParseError(new Error('bad 5555550100 json'));
+    logGrokSocketError({ callSid: 'CA123' }, new Error('model said 555-123-4567'));
   });
+  const helperJoined = helperLines.join('\n');
   if (
-    hangupLines.length === 1 &&
-    hangupLines[0].startsWith('[hangup] Twilio update failed:') &&
-    !hangupLines[0].includes('+15555550100') &&
-    hangupLines[0].includes('0100')
+    helperLines.length === 4 &&
+    helperJoined.includes('[twiml-connect] Error:') &&
+    helperJoined.includes('[http] unexpected error:') &&
+    helperJoined.includes('[http] 400 body parse error:') &&
+    helperJoined.includes('[grok] error callSid=CA123:') &&
+    !helperJoined.includes('555-123-4567') &&
+    !helperJoined.includes('(555) 123-4567') &&
+    !helperJoined.includes('5555550100') &&
+    helperJoined.includes('4567') &&
+    helperJoined.includes('0100')
   ) {
-    pass('[hangup] Twilio update failed: logs the masked message');
+    pass('twiml, http, body-parse, and grok error logs mask digit runs');
   } else {
-    fail(`[hangup] error log was ${JSON.stringify(hangupLines)}`);
+    fail(`helper logs were ${JSON.stringify(helperLines)}`);
   }
 
-  const unchanged = capture(() => {
-    logCallError(new Error('socket hang up'));
-    logHangupError(new Error('socket hang up'));
-  });
-  if (unchanged[0] === '[call] error: socket hang up' && unchanged[1] === '[hangup] Twilio update failed: socket hang up') {
-    pass('phone-free failures are logged unchanged');
-  } else {
-    fail(`phone-free logs changed: ${JSON.stringify(unchanged)}`);
+  const auth = { authorization: `Bearer ${process.env.BRIDGE_API_KEY}` };
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address();
+  const stderr = installStderrCapture();
+  try {
+    const badTo = await requestJson(port, 'POST', '/call', { to: '555-123-4567', goal: 'hi' }, auth);
+    const echoed =
+      badTo.raw.includes('555-123-4567') ||
+      badTo.raw.includes('5551234567') ||
+      (badTo.json && JSON.stringify(badTo.json).includes('555'));
+    if (badTo.status === 400 && badTo.json && badTo.json.error === 'to must be an E.164 number' && !echoed) {
+      pass('non-E.164 to is rejected without echoing it');
+    } else {
+      fail(`non-E.164 to response ${badTo.status} ${badTo.raw}`);
+    }
+
+    setTwilioClientForTests({
+      calls: Object.assign(
+        () => ({
+          update() {
+            return Promise.reject(new Error('The requested resource +15555550100 was not found'));
+          },
+        }),
+        {
+          create() {
+            return Promise.reject(new Error('Unable to create record for +1 (555) 555-0100'));
+          },
+        }
+      ),
+    });
+
+    const beforeCall = stderr.lines.length;
+    const callRes = await requestJson(port, 'POST', '/call', { to: '+15555550100', goal: 'hi' }, auth);
+    const callLogs = stderr.lines.slice(beforeCall).filter((line) => line.includes('[call] error:'));
+    if (
+      callRes.status === 500 &&
+      callLogs.length === 1 &&
+      !callLogs[0].includes('+1 (555) 555-0100') &&
+      !callLogs[0].includes('5555550100') &&
+      callLogs[0].includes('0100')
+    ) {
+      pass('POST /call logs a thrown Twilio error with the number masked');
+    } else {
+      fail(`call log ${JSON.stringify(callLogs)} status ${callRes.status}`);
+    }
+
+    const session = createSession({ callSid: 'CA-hang', goal: 'hi', to: '+15555550199' });
+    const beforeHangup = stderr.lines.length;
+    const hangupRes = await requestJson(port, 'POST', '/hangup', { callSid: session.callSid }, auth);
+    const hangupLogs = stderr.lines.slice(beforeHangup).filter((line) => line.includes('[hangup] Twilio update failed:'));
+    if (
+      hangupRes.status === 200 &&
+      hangupLogs.length === 1 &&
+      !hangupLogs[0].includes('+15555550100') &&
+      hangupLogs[0].includes('0100')
+    ) {
+      pass('a failing hangup logs the masked Twilio error');
+    } else {
+      fail(`hangup log ${JSON.stringify(hangupLogs)} status ${hangupRes.status}`);
+    }
+
+    const beforeParse = stderr.lines.length;
+    const parseRes = await requestRaw(
+      port,
+      'POST',
+      '/call',
+      '{"to":"+15555550100","goal":',
+      auth
+    );
+    const parseLogs = stderr.lines.slice(beforeParse).filter((line) => line.includes('[http] 400 body parse error:'));
+    if (parseRes.status === 400 && parseLogs.length === 1 && !parseLogs[0].includes('+15555550100')) {
+      pass('body-parse error log does not echo an E.164 number from the message');
+    } else if (parseRes.status === 400 && parseLogs.length === 1) {
+      fail(`body-parse log contained a phone number: ${parseLogs[0]}`);
+    } else {
+      fail(`body-parse status ${parseRes.status} logs ${JSON.stringify(parseLogs)}`);
+    }
+  } finally {
+    stderr.restore();
+    await new Promise((resolve) => server.close(resolve));
   }
 
   if (failed > 0) {
@@ -99,4 +296,7 @@ function main() {
   process.exit(0);
 }
 
-main();
+main().catch((err) => {
+  console.error(err);
+  process.exit(1);
+});

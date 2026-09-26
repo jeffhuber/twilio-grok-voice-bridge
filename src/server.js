@@ -38,9 +38,68 @@ function maskPhoneNumber(phone) {
   return 'x'.repeat(Math.min(s.length - 4, 8)) + last4;
 }
 
-// Twilio error text can include the destination. Mask E.164 numbers before logging.
+function isDigitChar(ch) {
+  return ch >= '0' && ch <= '9';
+}
+
+function isPhoneSep(ch) {
+  return ch === ' ' || ch === '-' || ch === '(' || ch === ')' || ch === '.';
+}
+
+function isWordChar(ch) {
+  return isDigitChar(ch) || (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z');
+}
+
+/**
+ * Mask digit runs of 7 or more digits. Separators space, hyphen, parentheses, and
+ * period may appear inside the run. A letter or digit on either side keeps the
+ * text, so Call SIDs (CA…) and short error codes stay intact.
+ */
 function maskPhoneNumbersInText(text) {
-  return String(text == null ? '' : text).replace(/\+\d{8,15}/g, (match) => maskPhoneNumber(match));
+  const s = String(text == null ? '' : text);
+  let out = '';
+  let i = 0;
+  while (i < s.length) {
+    const prev = i > 0 ? s[i - 1] : '';
+    const ch = s[i];
+    const opensNumber = ch === '+' || isDigitChar(ch) || (ch === '(' && isDigitChar(s[i + 1] || ''));
+    if (!opensNumber || isWordChar(prev)) {
+      out += ch;
+      i += 1;
+      continue;
+    }
+    let digits = 0;
+    let lastDigit = -1;
+    let k = i;
+    if (s[k] === '+') k += 1;
+    while (k < s.length) {
+      const c = s[k];
+      if (isDigitChar(c)) {
+        digits += 1;
+        lastDigit = k;
+        k += 1;
+        continue;
+      }
+      if (isPhoneSep(c)) {
+        k += 1;
+        continue;
+      }
+      break;
+    }
+    const after = s[lastDigit + 1] || '';
+    if (digits >= 7 && lastDigit >= i && !isWordChar(after)) {
+      out += maskPhoneNumber(s.slice(i, lastDigit + 1));
+      i = lastDigit + 1;
+      continue;
+    }
+    out += ch;
+    i += 1;
+  }
+  return out;
+}
+
+function isE164(value) {
+  return typeof value === 'string' && /^\+[1-9]\d{1,14}$/.test(value);
 }
 
 function logCallError(err) {
@@ -49,6 +108,25 @@ function logCallError(err) {
 
 function logHangupError(err) {
   console.error('[hangup] Twilio update failed:', maskPhoneNumbersInText(err && err.message));
+}
+
+function logTwimlConnectError(err) {
+  console.error('[twiml-connect] Error:', maskPhoneNumbersInText(err && err.message));
+}
+
+function logHttpUnexpectedError(err) {
+  console.error('[http] unexpected error:', maskPhoneNumbersInText(err && err.message));
+}
+
+function logBodyParseError(err) {
+  console.log(`[http] 400 body parse error: ${maskPhoneNumbersInText(err && err.message)}`);
+}
+
+function logGrokSocketError(session, err) {
+  console.error(
+    `[grok] error callSid=${session && session.callSid}:`,
+    maskPhoneNumbersInText(err && err.message)
+  );
 }
 
 /** Optional JSON map of alias → voice id, e.g. {"my-voice":"abc123","clone":"xyz"} */
@@ -319,10 +397,14 @@ if (!BRIDGE_API_KEY && ALLOW_UNAUTHENTICATED_OPERATOR) {
   console.warn('');
 }
 
-const twilioClient =
+let twilioClient =
   TWILIO_ACCOUNT_SID && TWILIO_AUTH_TOKEN
     ? twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
     : null;
+
+function setTwilioClientForTests(client) {
+  twilioClient = client;
+}
 
 /** @type {Map<string, CallSession>} callSid -> session */
 const sessionsByCallSid = new Map();
@@ -939,7 +1021,7 @@ function openGrokSession(session) {
   });
 
   grokWs.on('error', (err) => {
-    console.error(`[grok] error callSid=${session.callSid}:`, err.message);
+    logGrokSocketError(session, err);
   });
 
   grokWs.on('close', (code, reason) => {
@@ -1265,14 +1347,14 @@ app.use((err, req, res, next) => {
     err.statusCode === 400 ||
     (err instanceof SyntaxError && 'body' in err)
   ) {
-    console.log(`[http] 400 body parse error: ${err.message}`);
+    logBodyParseError(err);
     return res.status(400).json({ error: 'invalid request body' });
   }
 
   // Catch any other middleware errors and return safe generic response
   // Never expose stack traces, require.main paths, or filesystem details
   if (err) {
-    console.error('[http] unexpected error:', err.message);
+    logHttpUnexpectedError(err);
     return res.status(500).json({ error: 'internal server error' });
   }
 
@@ -1420,7 +1502,7 @@ app.all('/twiml-connect', (req, res) => {
     console.log(`[twiml-connect] Generated TwiML callSid=${callSid} ts=${timestamp} method=${req.method}`);
     res.type('text/xml').send(twiml);
   } catch (err) {
-    console.error('[twiml-connect] Error:', err.message);
+    logTwimlConnectError(err);
     res.status(500).type('text/xml').send('<Response><Hangup/></Response>');
   }
 });
@@ -1431,6 +1513,9 @@ app.post('/call', requireBridgeAuth, async (req, res) => {
     const { to, goal, context, voice, style, softContinue } = req.body || {};
     if (!to || !goal) {
       return res.status(400).json({ error: 'to and goal are required' });
+    }
+    if (!isE164(to)) {
+      return res.status(400).json({ error: 'to must be an E.164 number' });
     }
     if (!twilioClient) {
       return res.status(500).json({ error: 'Twilio client not configured' });
@@ -1838,8 +1923,17 @@ if (require.main === module) {
 }
 
 module.exports = {
+  app,
+  server,
+  createSession,
   maskPhoneNumber,
   maskPhoneNumbersInText,
+  isE164,
   logCallError,
   logHangupError,
+  logTwimlConnectError,
+  logHttpUnexpectedError,
+  logBodyParseError,
+  logGrokSocketError,
+  setTwilioClientForTests,
 };
