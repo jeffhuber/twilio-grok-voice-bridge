@@ -54,6 +54,13 @@ jobs:
           PUBLIC_HOST: bridge.example.com
         run: node test/test-media-stream-url.js
       
+      - name: Run delivery tag stripping test
+        env:
+          BRIDGE_API_KEY: ci-test-key
+        run: |
+          echo "=== Running delivery tag stripping test ==="
+          node test/test-delivery-tags.js
+      
       - name: Run body-parser safety test
         env:
           BRIDGE_API_KEY: ci-test-key-not-a-secret
