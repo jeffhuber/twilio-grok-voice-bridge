@@ -45,7 +45,7 @@ Request bodies: docs/http-examples.md. Agent wiring: SKILL.md.
 
 Body JSON:
 
-- `to` (required) — destination E.164
+- `to` (required) — destination E.164 (`+` and 2 to 15 digits). Any other value is 400 and the response does not include it.
 - `goal` (required) — what the voice agent should accomplish
 - `context` (optional)
 - `style` (optional) — `support` | `restaurant-book` | `custom`
@@ -53,7 +53,7 @@ Body JSON:
 - `softContinue` (optional bool)
 - `openerOnConnect` (optional boolean) — omit to follow `DISABLE_OPENER_ON_CONNECT` (default: greet once). `false` skips that greeting. `true` forces it even when `DISABLE_OPENER_ON_CONNECT` is exactly `1`. Any other JSON type, including `"false"`, `0`, and `null`, is 400.
 
-Outbound calls greet once the model has accepted `audio/pcmu` output. The greeting is one `response.create`, and only when that `session.updated` event reports output format `audio/pcmu`. An `error` event, or a thrown send of the first `session.update`, clears the wait. The greeting is skipped when the callee is already speaking or already has a transcript line. `DISABLE_OPENER_ON_CONNECT` set to exactly `1` disables the default. Other values, including unset, `0`, and `false`, leave it on.
+Outbound calls greet once the model has accepted `audio/pcmu` output. The first `session.updated` clears the wait whether or not it reports `audio/pcmu`. The greeting is one `response.create`, and only when that same ack reports output format `audio/pcmu`. An `error` event, or a thrown send of the first `session.update`, clears the wait. The greeting is skipped when the callee is already speaking or already has a transcript line. `DISABLE_OPENER_ON_CONNECT` set to exactly `1` disables the default. Other values, including unset, `0`, and `false`, leave it on.
 
 Returns `callSid`, `style`, `voice`, etc.
 
@@ -87,10 +87,10 @@ The `/media-stream` WebSocket endpoint checks an HMAC-SHA256 signature on the Tw
 
 **How it works:**
 1. When `/call` is invoked, Twilio fetches TwiML from the `/twiml-connect` endpoint
-2. The bridge generates an HMAC-SHA256 signature over `callSid:timestamp`, and BRIDGE_API_KEY is set. The media secret is `MEDIA_STREAM_SECRET` when that value is non-empty after trimming; otherwise `BRIDGE_API_KEY`. If `BRIDGE_API_KEY` is unset, the signature is not minted, even when `MEDIA_STREAM_SECRET` is set.
+2. The bridge generates an HMAC-SHA256 signature over `callSid:timestamp` when BRIDGE_API_KEY is set. The media secret is `MEDIA_STREAM_SECRET` when that value is non-empty after trimming; otherwise `BRIDGE_API_KEY`. If `BRIDGE_API_KEY` is unset, the signature is not minted, even when `MEDIA_STREAM_SECRET` is set.
 3. The `<Stream url>` is the bare path `wss://HOST/media-stream` with no query string. Twilio error [31920](https://www.twilio.com/docs/api/errors/31920) rejects Stream URLs that include a query string.
 4. `callSid`, `timestamp`, and `signature` are `<Parameter>` values. Twilio delivers them on the start message as `start.customParameters` ([WebSocket messages](https://www.twilio.com/docs/voice/media-streams/websocket-messages)).
-5. The WebSocket upgrade accepts `/media-stream` without reading auth from the query string. Until `start` binds, the socket is unauthenticated. Messages are limited to 64 KiB. At most 32 sockets may wait for `start`. One Twilio `connected` event is ignored. Any other frame before `start` closes the socket with 1008, and a socket with no bound `start` within 5 seconds is closed with 1008. Pre-bind logs do not include the client event name.
+5. The WebSocket upgrade accepts `/media-stream` without reading auth from the query string. Until `start` binds, the socket is unauthenticated. Messages are limited to 64 KiB. One Twilio `connected` event is ignored. Any other frame before `start` closes the socket with 1008, and a socket with no bound `start` within 5 seconds is closed with 1008. Those closes terminate about 1 second later if the peer does not finish the handshake. At most 4 unbound sockets are accepted per client, and at most 32 at once. When the global cap is full, the oldest unbound socket is evicted instead of refusing the new one. The per-client key is `CF-Connecting-IP` only when the TCP peer is loopback; otherwise it is the remote address. A valid `X-Twilio-Signature` does not count toward those caps when `TWILIO_AUTH_TOKEN` is set. Pre-bind logs do not include the client event name. Rate limit `/media-stream` at the edge as well.
 6. On Twilio's `start` event the bridge:
    - Reads `callSid`, `timestamp`, and `signature` only from `start.customParameters`
    - Requires `start.callSid` to match that `callSid`
@@ -128,7 +128,7 @@ Anyone who captures the TwiML `<Parameter>` values can open `/media-stream` and 
 
 **Crash containment:** All WebSocket message handlers validate and parse JSON defensively. Malformed or null frames are logged and ignored per-socket; parsing errors never crash the Node process.
 
-**Session garbage collection:** Every 2 minutes, a session that has connected and whose Twilio and Grok sockets are both not open is removed without a hangup. A session that has never connected (still ringing) is kept until it is older than `NEVER_CONNECTED_TIMEOUT_MS` (default 10 minutes), so an early sweep does not make `/twiml-connect` return 404. A session that still has a socket open and is older than `SESSION_MAX_AGE_MS` (default 2 hours) is hung up.
+**Session garbage collection:** Every 2 minutes, a session that has connected and whose Twilio and Grok sockets are both not open is removed without a hangup. A session that has never connected (still ringing) is kept until it is older than `NEVER_CONNECTED_TIMEOUT_MS` (default 10 minutes), so an early sweep does not make `/twiml-connect` return 404. That timeout must be a finite positive integer. `NaN`, `0`, a negative number, and `Infinity` warn and use the default. A session that still has a socket open and is older than `SESSION_MAX_AGE_MS` (default 2 hours) is hung up.
 
 **One stream per CallSid:** The bridge enforces one active Twilio Media Stream per CallSid. Duplicate stream attempts for the same call are rejected with WebSocket close code 1008.
 
@@ -196,11 +196,11 @@ Media-stream HMAC uses `MEDIA_STREAM_SECRET` when that value is non-empty after 
 | `ALLOW_UNAUTHENTICATED_OPERATOR` | Exactly `1` starts without `BRIDGE_API_KEY` and leaves operator routes open. It does not enable media HMAC | off |
 | `MEDIA_AUTH_WINDOW_MS` | HMAC timestamp window in milliseconds | `120000` |
 | `SESSION_MAX_AGE_MS` | A session older than this with a socket still open is hung up. A session that already connected and whose sockets are both closed is removed without a hangup, at any age | `7200000` |
-| `NEVER_CONNECTED_TIMEOUT_MS` | How long a never-connected (still ringing) session is kept before the sweep removes it. `"0"` is kept | `600000` |
+| `NEVER_CONNECTED_TIMEOUT_MS` | How long a never-connected (still ringing) session is kept before the sweep removes it. Finite positive integer only; other values warn and use the default | `600000` |
 | `DISABLE_OPENER_ON_CONNECT` | Exactly `1` disables the greeting sent when the stream connects. Any other value, including unset, `0`, and `false`, leaves the greeting on. Per-call `openerOnConnect: true` still greets | off (greeting on) |
 | `ENABLE_RECORDING` | Exactly `1` passes `record: true` and dual-channel recording to Twilio | off |
 | `SKIP_AI_DISCLOSURE` | Exactly `1` omits the AI disclosure block from instructions | off (disclosure on) |
-| `LOG_TRANSCRIPTS` | Exactly `1` writes transcript lines to stdout. The placed-call log masks the destination. `[call] error:` and a failed Twilio hangup log `err.message` after E.164 numbers in that text are masked | off |
+| `LOG_TRANSCRIPTS` | Exactly `1` writes transcript lines to stdout. The placed-call log masks the destination. `[call] error:` and a failed Twilio hangup log `err.message` after digit runs of 7 or more in that text are masked | off |
 | `CONTACT_FULL_NAME` | Optional name for restaurant-book instructions | unset |
 | `CONTACT_MOBILE` | Optional callback number for restaurant-book instructions | unset |
 | `VAD_THRESHOLD` | Server VAD threshold | `0.7` |
@@ -242,7 +242,7 @@ Optional softContinue true on POST /call enables post-playback soft-continue.
 - **X-Twilio-Signature validation**: Runs on `/twiml-connect` only when `TWILIO_AUTH_TOKEN` is non-empty. The checked URL uses `PUBLIC_HOST`; a different host than the one Twilio signed returns 403.
 - **Recording** is on only when `ENABLE_RECORDING` is exactly `1`.
 - **AI disclosure** stays on unless `SKIP_AI_DISCLOSURE` is exactly `1`.
-- **Privacy defaults:** The placed-call log masks the destination. `[call] error:` and a failed Twilio hangup log `err.message` after E.164 numbers in that text are masked. Transcript lines are written to stdout only when `LOG_TRANSCRIPTS` is exactly `1`.
+- **Privacy defaults:** The placed-call log masks the destination. `[call] error:`, `[hangup] Twilio update failed:`, `[twiml-connect] Error:`, `[http] unexpected error:`, `[http] 400 body parse error:`, and `[grok] error` log `err.message` after digit runs of 7 or more in that text are masked. Spaces, hyphens, parentheses, and periods inside the run count. A letter or digit on either side is left alone, so Call SIDs and short error codes stay intact. Transcript lines are written to stdout only when `LOG_TRANSCRIPTS` is exactly `1`.
 - Keep Twilio tokens, xAI keys, BRIDGE_API_KEY, and real phone numbers out of git.
 - Twilio needs a public WSS URL for Media Streams.
 

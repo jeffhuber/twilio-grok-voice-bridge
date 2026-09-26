@@ -128,14 +128,16 @@ if (readme.includes('masked either way') || example.includes('masked either way'
   fail('docs still say numbers are masked either way');
 } else if (readme.includes('without that mask')) {
   fail('README still says Twilio client errors are logged without a mask');
-} else if (!readme.includes('err.message') || !readme.includes('E.164 numbers in that text are masked')) {
-  fail('README does not say E.164 numbers inside err.message are masked');
+} else if (!readme.includes('err.message') || !readme.includes('digit runs of 7 or more in that text are masked')) {
+  fail('README does not say digit runs inside err.message are masked');
 } else {
   pass('placed-call and Twilio error logs mask phone numbers');
 }
 
-if (!readme.includes('and BRIDGE_API_KEY is set')) {
-  fail('README step 2 does not say BRIDGE_API_KEY is set');
+if (!readme.includes('when BRIDGE_API_KEY is set')) {
+  fail('README step 2 does not say when BRIDGE_API_KEY is set');
+} else if (!readme.includes('oldest unbound') || !readme.includes('per client')) {
+  fail('README does not describe the per-client cap or eviction of the oldest unbound socket');
 } else if (!readme.includes('wss://HOST/media-stream') || !readme.includes('start.customParameters')) {
   fail('README does not describe the bare Stream URL and start parameters');
 } else if (readme.includes('Token leakage') || readme.includes('Signature burn') || readme.includes('restored to pending')) {
