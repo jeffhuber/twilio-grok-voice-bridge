@@ -38,6 +38,104 @@ function maskPhoneNumber(phone) {
   return 'x'.repeat(Math.min(s.length - 4, 8)) + last4;
 }
 
+function isDigitChar(ch) {
+  return ch >= '0' && ch <= '9';
+}
+
+function isPhoneSep(ch) {
+  return ch === ' ' || ch === '-' || ch === '(' || ch === ')' || ch === '.';
+}
+
+function isWordChar(ch) {
+  return isDigitChar(ch) || (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z');
+}
+
+function isIpv4(text) {
+  const parts = String(text).split('.');
+  if (parts.length !== 4) return false;
+  for (let i = 0; i < parts.length; i += 1) {
+    if (!/^\d{1,3}$/.test(parts[i])) return false;
+    const n = Number(parts[i]);
+    if (n > 255) return false;
+  }
+  return true;
+}
+
+function isCalendarDate(text) {
+  const ymd = String(text).match(/^(\d{4})[-.](\d{2})[-.](\d{2})$/);
+  if (ymd) return calendarParts(ymd[1], ymd[2], ymd[3]);
+  const dmy = String(text).match(/^(\d{2})[-.](\d{2})[-.](\d{4})$/);
+  if (!dmy) return false;
+  return calendarParts(dmy[3], dmy[1], dmy[2]) || calendarParts(dmy[3], dmy[2], dmy[1]);
+}
+
+function calendarParts(year, month, day) {
+  const y = Number(year);
+  const m = Number(month);
+  const d = Number(day);
+  return y >= 1000 && y <= 9999 && m >= 1 && m <= 12 && d >= 1 && d <= 31;
+}
+
+function isEpochMilliseconds(digits) {
+  if (digits.length !== 13) return false;
+  const n = Number(digits);
+  return n >= 1000000000000 && n < 100000000000000;
+}
+
+/**
+ * Mask digit runs of 7 or more. Separators may appear inside the run.
+ * A letter or digit on either side keeps the text. IPv4 addresses, calendar
+ * dates, and 13-digit epoch-millisecond values are left alone.
+ */
+function maskPhoneNumbersInText(text) {
+  const s = String(text == null ? '' : text).replace(/[\r\n]/g, ' ');
+  let out = '';
+  let i = 0;
+  while (i < s.length) {
+    const prev = i > 0 ? s[i - 1] : '';
+    const ch = s[i];
+    const opensNumber = ch === '+' || isDigitChar(ch) || (ch === '(' && isDigitChar(s[i + 1] || ''));
+    if (!opensNumber || isWordChar(prev)) {
+      out += ch;
+      i += 1;
+      continue;
+    }
+    let digits = 0;
+    let lastDigit = -1;
+    let k = i;
+    if (s[k] === '+') k += 1;
+    while (k < s.length) {
+      const c = s[k];
+      if (isDigitChar(c)) {
+        digits += 1;
+        lastDigit = k;
+        k += 1;
+        continue;
+      }
+      if (isPhoneSep(c)) {
+        k += 1;
+        continue;
+      }
+      break;
+    }
+    const slice = lastDigit >= i ? s.slice(i, lastDigit + 1) : '';
+    const after = s[lastDigit + 1] || '';
+    const keep =
+      !slice ||
+      isIpv4(slice) ||
+      isCalendarDate(slice) ||
+      isEpochMilliseconds(slice.replace(/\D/g, ''));
+    if (digits >= 7 && lastDigit >= i && !isWordChar(after) && !keep) {
+      out += maskPhoneNumber(slice);
+      i = lastDigit + 1;
+      continue;
+    }
+    out += ch;
+    i += 1;
+  }
+  return out;
+}
+
 /** Optional JSON map of alias → voice id, e.g. {"my-voice":"abc123","clone":"xyz"} */
 function loadVoiceAliases() {
   const builtIn = {
@@ -1683,14 +1781,18 @@ const MEDIA_WS_MAX_PAYLOAD = 64 * 1024;
 const MEDIA_START_TIMEOUT_MS = 5000;
 const MAX_AWAITING_MEDIA_SOCKETS = 32;
 const MAX_AWAITING_MEDIA_SOCKETS_PER_CLIENT = 4;
+const MAX_AWAITING_SIGNED_MEDIA_SOCKETS = 128;
+const MAX_AWAITING_SIGNED_MEDIA_SOCKETS_PER_CLIENT = 8;
 const MEDIA_PREBIND_TERMINATE_MS = 1000;
 
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ noServer: true, maxPayload: MEDIA_WS_MAX_PAYLOAD });
 let awaitingMediaStarts = 0;
+let awaitingSignedMediaStarts = 0;
 const unauthMediaLog = { at: 0 };
 const mediaRejectLog = { at: 0 };
 const wsErrorLog = { at: 0 };
+const upgradeSigRejectLog = { at: 0 };
 const prebindKillTimers = new WeakMap();
 /** @type {UnboundMediaSocket[]} */
 const unboundMediaSockets = [];
@@ -1699,6 +1801,7 @@ const unboundMediaSockets = [];
  * @typedef {object} UnboundMediaSocket
  * @property {import('ws')} ws
  * @property {string} clientKey
+ * @property {'signed'|'unsigned'} pool
  * @property {boolean} counted
  * @property {boolean} bound
  * @property {boolean} dropped
@@ -1726,14 +1829,50 @@ function noteMediaStartRejected(error) {
 
 function noteWsError(err) {
   logAtMostOncePerSecond(wsErrorLog, () => {
-    console.error('[twilio] ws error:', err && err.message);
+    console.error('[twilio] ws error:', maskPhoneNumbersInText(err && err.message));
+  });
+}
+
+function noteUpgradeSignatureRejected(host, pathOnly) {
+  logAtMostOncePerSecond(upgradeSigRejectLog, () => {
+    console.warn(
+      `[twilio] media upgrade signature rejected host=${maskPhoneNumbersInText(host)} path=${maskPhoneNumbersInText(pathOnly)}`
+    );
   });
 }
 
 function normalizeIp(addr) {
   if (!addr) return '';
-  const text = String(addr);
+  let text = String(addr).trim().toLowerCase();
+  const zone = text.indexOf('%');
+  if (zone >= 0) text = text.slice(0, zone);
   return text.startsWith('::ffff:') ? text.slice('::ffff:'.length) : text;
+}
+
+function expandIpv6(addr) {
+  const text = normalizeIp(addr);
+  if (!text || text.includes('.')) return null;
+  const halves = text.split('::');
+  if (halves.length > 2) return null;
+  const head = halves[0] ? halves[0].split(':') : [];
+  const tail = halves.length === 2 ? (halves[1] ? halves[1].split(':') : []) : [];
+  if (halves.length === 1 && head.length !== 8) return null;
+  const missing = 8 - head.length - tail.length;
+  if (missing < 0) return null;
+  const groups = halves.length === 1 ? head : head.concat(Array(missing).fill('0'), tail);
+  if (groups.length !== 8) return null;
+  if (groups.some((group) => !/^[0-9a-f]{1,4}$/.test(group))) return null;
+  return groups.map((group) => group.padStart(4, '0'));
+}
+
+/** IPv4 stays the full address. IPv6 is the /64 prefix. */
+function networkKey(addr) {
+  const ip = normalizeIp(addr);
+  if (!ip) return 'unknown';
+  if (!ip.includes(':')) return ip;
+  const groups = expandIpv6(ip);
+  if (!groups) return ip;
+  return groups.slice(0, 4).join(':');
 }
 
 function isTrustedTunnelPeer(addr) {
@@ -1751,6 +1890,7 @@ function firstHeader(value) {
  * CF-Connecting-IP is used only when the TCP peer is loopback, which is the
  * local cloudflared process. Behind that tunnel every socket is 127.0.0.1.
  * Any other peer is keyed by remote address so a client cannot spoof the header.
+ * IPv6 clients share a key for the /64 prefix.
  * @param {import('http').IncomingMessage} req
  */
 function mediaClientKey(req) {
@@ -1759,15 +1899,18 @@ function mediaClientKey(req) {
     const raw = firstHeader(req && req.headers && req.headers['cf-connecting-ip']);
     if (typeof raw === 'string') {
       const cf = raw.split(',')[0].trim();
-      if (cf && cf.length <= 64 && !/\s/.test(cf)) return `cf:${cf}`;
+      if (cf && cf.length <= 64 && !/\s/.test(cf)) return `cf:${networkKey(cf)}`;
     }
   }
-  return `ip:${remote || 'unknown'}`;
+  return `ip:${remote ? networkKey(remote) : 'unknown'}`;
 }
 
 /**
- * A valid X-Twilio-Signature on the upgrade does not count toward the pre-start caps.
- * Twilio signs the public wss or https URL. No token means nothing is exempt.
+ * A valid X-Twilio-Signature moves the socket into the signed pre-bind pool.
+ * It does not exempt the socket from every cap: the signature is static for
+ * the host and does not expire. No token means nothing is signed.
+ * A present header that does not validate is logged (rate-limited) and the
+ * socket stays in the unsigned pool.
  * @param {import('http').IncomingMessage} req
  */
 function mediaUpgradeIsTwilioSigned(req) {
@@ -1792,6 +1935,8 @@ function mediaUpgradeIsTwilioSigned(req) {
       }
     }
   }
+  const loggedHost = typeof hostHeader === 'string' && hostHeader ? hostHeader : PUBLIC_HOST || '';
+  noteUpgradeSignatureRejected(loggedHost, pathOnly);
   return false;
 }
 
@@ -1800,22 +1945,40 @@ function forgetUnbound(entry) {
   if (idx >= 0) unboundMediaSockets.splice(idx, 1);
 }
 
-function unboundCountFor(clientKey) {
+function unboundCountFor(clientKey, pool) {
   let count = 0;
   for (let i = 0; i < unboundMediaSockets.length; i += 1) {
-    if (unboundMediaSockets[i].counted && unboundMediaSockets[i].clientKey === clientKey) count += 1;
+    const entry = unboundMediaSockets[i];
+    if (entry.counted && entry.pool === pool && entry.clientKey === clientKey) count += 1;
   }
   return count;
 }
 
-function evictOldestUnbound() {
+function poolLimit(pool, kind) {
+  if (pool === 'signed' && kind === 'client') return MAX_AWAITING_SIGNED_MEDIA_SOCKETS_PER_CLIENT;
+  if (pool === 'signed') return MAX_AWAITING_SIGNED_MEDIA_SOCKETS;
+  if (kind === 'client') return MAX_AWAITING_MEDIA_SOCKETS_PER_CLIENT;
+  return MAX_AWAITING_MEDIA_SOCKETS;
+}
+
+function poolSize(pool) {
+  return pool === 'signed' ? awaitingSignedMediaStarts : awaitingMediaStarts;
+}
+
+function bumpPool(pool, delta) {
+  if (pool === 'signed') awaitingSignedMediaStarts += delta;
+  else awaitingMediaStarts += delta;
+}
+
+function evictOldestUnbound(pool, clientKey) {
   for (let i = 0; i < unboundMediaSockets.length; i += 1) {
     const entry = unboundMediaSockets[i];
-    if (entry.counted && !entry.bound && !entry.dropped) {
-      entry.drop(1008, 'evicted');
-      return;
-    }
+    if (entry.pool !== pool || !entry.counted || entry.bound || entry.dropped) continue;
+    if (clientKey && entry.clientKey !== clientKey) continue;
+    entry.drop(1008, 'evicted');
+    return true;
   }
+  return false;
 }
 
 function armPrebindTerminate(ws) {
@@ -1863,6 +2026,7 @@ wss.on('connection', (ws, req) => {
   // The upgrade is unauthenticated. Twilio sends one "connected" event, then "start".
   const clientKey = mediaClientKey(req);
   const exempt = mediaUpgradeIsTwilioSigned(req);
+  const pool = exempt ? 'signed' : 'unsigned';
   /** @type {UnboundMediaSocket|null} */
   let entry = null;
 
@@ -1871,12 +2035,18 @@ wss.on('connection', (ws, req) => {
     if (!entry || !entry.bound) armPrebindTerminate(ws);
   });
 
-  if (!exempt && unboundCountFor(clientKey) >= MAX_AWAITING_MEDIA_SOCKETS_PER_CLIENT) {
-    rejectPrebindSocket(ws, 1008, 'too many pending streams');
-    return;
+  if (unboundCountFor(clientKey, pool) >= poolLimit(pool, 'client')) {
+    const evicted = pool === 'signed' && evictOldestUnbound(pool, clientKey);
+    if (!evicted) {
+      rejectPrebindSocket(ws, 1008, 'too many pending streams');
+      return;
+    }
   }
-  if (!exempt && awaitingMediaStarts >= MAX_AWAITING_MEDIA_SOCKETS) {
-    evictOldestUnbound();
+  if (poolSize(pool) >= poolLimit(pool, 'global')) {
+    if (!evictOldestUnbound(pool)) {
+      rejectPrebindSocket(ws, 1008, 'too many pending streams');
+      return;
+    }
   }
 
   /** @type {CallSession|null} */
@@ -1887,6 +2057,7 @@ wss.on('connection', (ws, req) => {
   entry = {
     ws,
     clientKey,
+    pool,
     counted: false,
     bound: false,
     dropped: false,
@@ -1896,7 +2067,7 @@ wss.on('connection', (ws, req) => {
   const releaseAwaiting = () => {
     if (!entry.counted) return;
     entry.counted = false;
-    awaitingMediaStarts -= 1;
+    bumpPool(pool, -1);
   };
 
   const startTimer = setTimeout(() => {
@@ -1913,10 +2084,8 @@ wss.on('connection', (ws, req) => {
     rejectPrebindSocket(ws, code, reason);
   };
 
-  if (!exempt) {
-    entry.counted = true;
-    awaitingMediaStarts += 1;
-  }
+  entry.counted = true;
+  bumpPool(pool, 1);
   unboundMediaSockets.push(entry);
 
   ws.on('message', (data) => {
@@ -2021,7 +2190,10 @@ module.exports = {
   MEDIA_START_TIMEOUT_MS,
   MAX_AWAITING_MEDIA_SOCKETS,
   MAX_AWAITING_MEDIA_SOCKETS_PER_CLIENT,
+  MAX_AWAITING_SIGNED_MEDIA_SOCKETS,
+  MAX_AWAITING_SIGNED_MEDIA_SOCKETS_PER_CLIENT,
   MEDIA_PREBIND_TERMINATE_MS,
   mediaClientKey,
   noteUnauthMediaClose,
+  maskPhoneNumbersInText,
 };

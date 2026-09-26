@@ -30,7 +30,7 @@ All control-plane routes (`/call`, `/steer`, `/hangup`, `/voice`, `/transcript`)
 **Single-use claim:**
 - Signatures can only be claimed once; a second start with the same signature is rejected and the socket is closed
 - CallSid binding: `start.callSid` must match the signed parameter; mismatches close the WebSocket
-- The socket is unauthenticated until `start`. Frames are capped at 64 KiB. One client may hold at most 4 unbound sockets, and the process at most 32. A full global list evicts the oldest unbound socket. The per-client key is `CF-Connecting-IP` only for a loopback peer (the local tunnel); otherwise it is the remote address. A valid `X-Twilio-Signature` is exempt from those caps when `TWILIO_AUTH_TOKEN` is set. A non-start frame other than one `connected` event closes the socket, and a missing `start` closes it after 5 seconds. Pre-bind closes terminate after about 1 second if the handshake is not finished. A consumed signature is not put back. Rate limit this path at the edge as well
+- The socket is unauthenticated until `start`. Frames are capped at 64 KiB. One client may hold at most 4 unbound sockets, and the process at most 32. A full global list evicts the oldest unbound socket in that pool. The per-client key is `CF-Connecting-IP` only for a loopback peer (the local tunnel); otherwise it is the remote address. IPv6 clients are keyed by the /64 prefix. A valid `X-Twilio-Signature` is not unlimited: it uses a separate pool of 8 unbound sockets per client and 128 globally, and a full signed pool evicts the oldest unbound signed socket. The signature is static for the host. A header that is present but fails validation is logged at most once per second, without the header value, and the socket stays in the unsigned pool. A non-start frame other than one `connected` event closes the socket, and a missing `start` closes it after 5 seconds. Pre-bind closes terminate after about 1 second if the handshake is not finished. A consumed signature is not put back. Rate limit this path at the edge as well
 
 ### 3. Session Lifecycle Management
 
@@ -116,7 +116,7 @@ Use `.env` (gitignored) or secret management systems for deployments.
   - Short TTL (default 2 minutes)
   - Signature tied to specific CallSid (cannot transfer to other calls)
   - Upgrade does not read auth from the query string
-  - Waiting sockets are capped per client and globally. A full global list evicts the oldest unbound socket, and a pre-bind close terminates if the peer does not answer the handshake. Frame size and the time before `start` are capped. Rate limit `/media-stream` at the edge; these caps are not a substitute
+  - Waiting sockets are capped per client and globally, with a separate cap for upgrades that carry a valid `X-Twilio-Signature`. A full list evicts the oldest unbound socket in that pool, and a pre-bind close terminates if the peer does not answer the handshake. Frame size and the time before `start` are capped. Rate limit `/media-stream` at the edge; these caps are not a substitute
 
 *Scenario 2: `/twiml-connect` sessionId leak*
 - If `sessionId` query parameter is leaked before Twilio fetches TwiML
