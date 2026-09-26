@@ -50,13 +50,45 @@ function isWordChar(ch) {
   return isDigitChar(ch) || (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z');
 }
 
+function isIpv4(text) {
+  const parts = String(text).split('.');
+  if (parts.length !== 4) return false;
+  for (let i = 0; i < parts.length; i += 1) {
+    if (!/^\d{1,3}$/.test(parts[i])) return false;
+    const n = Number(parts[i]);
+    if (n > 255) return false;
+  }
+  return true;
+}
+
+function isCalendarDate(text) {
+  const ymd = String(text).match(/^(\d{4})[-.](\d{2})[-.](\d{2})$/);
+  if (ymd) return calendarParts(ymd[1], ymd[2], ymd[3]);
+  const dmy = String(text).match(/^(\d{2})[-.](\d{2})[-.](\d{4})$/);
+  if (!dmy) return false;
+  return calendarParts(dmy[3], dmy[1], dmy[2]) || calendarParts(dmy[3], dmy[2], dmy[1]);
+}
+
+function calendarParts(year, month, day) {
+  const y = Number(year);
+  const m = Number(month);
+  const d = Number(day);
+  return y >= 1000 && y <= 9999 && m >= 1 && m <= 12 && d >= 1 && d <= 31;
+}
+
+function isEpochMilliseconds(digits) {
+  if (digits.length !== 13) return false;
+  const n = Number(digits);
+  return n >= 1000000000000 && n < 100000000000000;
+}
+
 /**
- * Mask digit runs of 7 or more digits. Separators space, hyphen, parentheses, and
- * period may appear inside the run. A letter or digit on either side keeps the
- * text, so Call SIDs (CA…) and short error codes stay intact.
+ * Mask digit runs of 7 or more. Separators may appear inside the run.
+ * A letter or digit on either side keeps the text. IPv4 addresses, calendar
+ * dates, and 13-digit epoch-millisecond values are left alone.
  */
 function maskPhoneNumbersInText(text) {
-  const s = String(text == null ? '' : text);
+  const s = String(text == null ? '' : text).replace(/[\r\n]/g, ' ');
   let out = '';
   let i = 0;
   while (i < s.length) {
@@ -86,9 +118,15 @@ function maskPhoneNumbersInText(text) {
       }
       break;
     }
+    const slice = lastDigit >= i ? s.slice(i, lastDigit + 1) : '';
     const after = s[lastDigit + 1] || '';
-    if (digits >= 7 && lastDigit >= i && !isWordChar(after)) {
-      out += maskPhoneNumber(s.slice(i, lastDigit + 1));
+    const keep =
+      !slice ||
+      isIpv4(slice) ||
+      isCalendarDate(slice) ||
+      isEpochMilliseconds(slice.replace(/\D/g, ''));
+    if (digits >= 7 && lastDigit >= i && !isWordChar(after) && !keep) {
+      out += maskPhoneNumber(slice);
       i = lastDigit + 1;
       continue;
     }
@@ -127,6 +165,28 @@ function logGrokSocketError(session, err) {
     `[grok] error callSid=${session && session.callSid}:`,
     maskPhoneNumbersInText(err && err.message)
   );
+}
+
+function logGrokJsonParseError(session, err) {
+  console.error(
+    `[grok] JSON parse error callSid=${session && session.callSid}:`,
+    maskPhoneNumbersInText(err && err.message)
+  );
+}
+
+function logTwilioJsonParseError(session, err) {
+  console.error(
+    `[twilio] JSON parse error callSid=${session && session.callSid}:`,
+    maskPhoneNumbersInText(err && err.message)
+  );
+}
+
+function logTwilioMediaJsonParseError(err) {
+  console.error('[twilio] JSON parse error on media-stream ws:', maskPhoneNumbersInText(err && err.message));
+}
+
+function logTwilioWsError(err) {
+  console.error('[twilio] ws error:', maskPhoneNumbersInText(err && err.message));
 }
 
 /** Optional JSON map of alias → voice id, e.g. {"my-voice":"abc123","clone":"xyz"} */
@@ -1010,7 +1070,7 @@ function openGrokSession(session) {
       }
       event = JSON.parse(text);
     } catch (err) {
-      console.error(`[grok] JSON parse error callSid=${session.callSid}:`, err.message);
+      logGrokJsonParseError(session, err);
       return;
     }
     if (!event || typeof event !== 'object') {
@@ -1180,7 +1240,7 @@ function handleTwilioMessage(session, raw) {
     }
     msg = JSON.parse(text);
   } catch (err) {
-    console.error(`[twilio] JSON parse error callSid=${session.callSid}:`, err.message);
+    logTwilioJsonParseError(session, err);
     return;
   }
   if (!msg || typeof msg !== 'object') {
@@ -1587,7 +1647,7 @@ app.post('/call', requireBridgeAuth, async (req, res) => {
       pendingByCallSid.delete(tempId);
       sessionsByCallSid.delete(tempId);
     }
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: maskPhoneNumbersInText(err && err.message) });
   }
 });
 
@@ -1801,7 +1861,7 @@ wss.on('connection', (ws, req) => {
       }
       msg = JSON.parse(text);
     } catch (err) {
-      console.error('[twilio] JSON parse error on media-stream ws:', err.message);
+      logTwilioMediaJsonParseError(err);
       return;
     }
     if (!msg || typeof msg !== 'object') {
@@ -1909,7 +1969,7 @@ wss.on('connection', (ws, req) => {
   });
 
   ws.on('error', (err) => {
-    console.error('[twilio] ws error:', err.message);
+    logTwilioWsError(err);
   });
 });
 
@@ -1935,5 +1995,9 @@ module.exports = {
   logHttpUnexpectedError,
   logBodyParseError,
   logGrokSocketError,
+  logGrokJsonParseError,
+  logTwilioJsonParseError,
+  logTwilioMediaJsonParseError,
+  logTwilioWsError,
   setTwilioClientForTests,
 };
