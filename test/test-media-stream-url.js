@@ -337,8 +337,8 @@ async function main() {
   } else {
     fail(`leading address was masked: ${leadingIp}`);
   }
-  const leadingZeros = maskPhoneNumbersInText('saw 044.123.45.67 today');
-  if (!leadingZeros.includes('044.123.45.67') && !leadingZeros.includes('044') && leadingZeros.includes('5.67')) {
+  const leadingZeros = maskPhoneNumbersInText('saw 000.123.45.67 today');
+  if (!leadingZeros.includes('000.123.45.67') && !leadingZeros.includes('000') && leadingZeros.includes('5.67')) {
     pass('a leading-zero dotted quad is masked');
   } else {
     fail(`leading-zero quad was kept: ${leadingZeros}`);

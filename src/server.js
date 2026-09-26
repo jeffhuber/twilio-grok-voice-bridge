@@ -77,8 +77,9 @@ function isExemptAddressOrDate(token) {
  * A letter or digit on either side keeps the text. An IPv4 address or a
  * calendar date is copied through per whitespace-delimited token, so a date
  * and an address separated by a space both stay. A dotted quad is exempt
- * only when net.isIPv4 accepts it. There is no epoch-millisecond exemption,
- * so a 13-digit run is masked, including a run that starts with +.
+ * only when net.isIPv4 accepts it, so an IPv4 address with leading zeros is
+ * not exempt. There is no epoch-millisecond exemption, so a 13-digit run is
+ * masked, including a run that starts with +.
  */
 function maskPhoneNumbersInText(text) {
   const s = String(text == null ? '' : text).replace(/[\r\n]/g, ' ');
@@ -1747,6 +1748,9 @@ app.get('/health', (_req, res) => {
     contactConfigured: Boolean(getContact().fullName || getContact().mobile),
     authRequired: Boolean(BRIDGE_API_KEY),
     hmacAuth: Boolean(mediaAuthSecret()),
+    // Boolean only. test/test-media-secret.js reads this to tell a dedicated
+    // MEDIA_STREAM_SECRET from the BRIDGE_API_KEY fallback. The body does not
+    // include either secret, so the flag stays on /health.
     mediaAuthDedicated: mediaAuthUsesDedicatedSecret(),
   });
 });
@@ -2502,8 +2506,6 @@ module.exports = {
   logGrokSocketError,
   logGrokJsonParseError,
   logTwilioJsonParseError,
-  setTwilioClientForTests,
-  setGrokRealtimeUrlForTests,
   handleTwilioMessage,
   handleGrokEvent,
   onGrokSocketOpen,
@@ -2511,3 +2513,10 @@ module.exports = {
   wss,
   stripDeliveryTags,
 };
+
+// Test seams stay off the production export. Tests and CI set NODE_ENV=test
+// before requiring this module.
+if (process.env.NODE_ENV === 'test') {
+  module.exports.setTwilioClientForTests = setTwilioClientForTests;
+  module.exports.setGrokRealtimeUrlForTests = setGrokRealtimeUrlForTests;
+}

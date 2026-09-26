@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 'use strict';
 
+process.env.NODE_ENV = 'test';
 process.env.BRIDGE_API_KEY = process.env.BRIDGE_API_KEY || 'operator-test-key';
 process.env.PUBLIC_HOST = process.env.PUBLIC_HOST || 'bridge.example.com';
 process.env.XAI_API_KEY = 'xai-test-key';
@@ -9,8 +10,10 @@ delete process.env.TWILIO_ACCOUNT_SID;
 delete process.env.TWILIO_AUTH_TOKEN;
 delete process.env.TWILIO_FROM_NUMBER;
 
+const { spawnSync } = require('child_process');
 const crypto = require('crypto');
 const http = require('http');
+const path = require('path');
 const WebSocket = require('ws');
 
 const voiceAliasWarnings = [];
@@ -36,6 +39,10 @@ const {
   handleTwilioMessage,
 } = require('../src/server.js');
 console.warn = originalWarn;
+if (typeof setTwilioClientForTests !== 'function' || typeof setGrokRealtimeUrlForTests !== 'function') {
+  console.error('test setters are missing; set NODE_ENV=test before loading the server');
+  process.exit(1);
+}
 setGrokRealtimeUrlForTests('ws://127.0.0.1:9');
 
 let failed = 0;
@@ -165,6 +172,36 @@ async function waitForLog(stderr, start, needle, ms) {
   return found;
 }
 
+function assertProductionExportOmitsTestSetters() {
+  const result = spawnSync(
+    process.execPath,
+    [
+      '-e',
+      [
+        "const server = require('./src/server.js');",
+        "const names = ['setTwilioClientForTests', 'setGrokRealtimeUrlForTests'];",
+        'const leaked = names.filter((name) => Object.prototype.hasOwnProperty.call(server, name));',
+        'if (leaked.length) { console.error(leaked.join(",")); process.exit(1); }',
+        'process.exit(0);',
+      ].join('\n'),
+    ],
+    {
+      cwd: path.join(__dirname, '..'),
+      env: Object.assign({}, process.env, {
+        NODE_ENV: 'production',
+        VOICE_ALIASES: '',
+      }),
+      encoding: 'utf8',
+      timeout: 8000,
+    }
+  );
+  if (result.status === 0) {
+    pass('production module.exports omits test setters');
+    return;
+  }
+  fail(`production module.exports still has test setters (${result.status}): ${result.stderr || result.stdout}`);
+}
+
 function assertMasked(label, raw, masked, last4) {
   if (!masked.includes(raw) && masked.includes(last4) && !/\d{7,}/.test(masked.replace(/x/g, ''))) {
     pass(label);
@@ -178,6 +215,8 @@ function assertMasked(label, raw, masked, last4) {
 }
 
 async function main() {
+  assertProductionExportOmitsTestSetters();
+
   const samples = [
     ['555-0100', '0100'],
     ['(555) 555-0100', '0100'],
@@ -226,17 +265,60 @@ async function main() {
   } else {
     fail(`glued date and address were masked: ${glued}`);
   }
+  // The phone group is flushed when the exempt address is seen, not at the end of the run.
+  // If that mid-run flush stops masking, the phone digits remain next to the address.
+  const beforeExempt = maskPhoneNumbersInText('555 555 0100 198.51.100.10');
+  const beforeExemptThenPhone = maskPhoneNumbersInText('555 555 0100 198.51.100.10 555 555 0199');
+  if (
+    beforeExempt === 'xxxxxxxx0100 198.51.100.10' &&
+    beforeExemptThenPhone === 'xxxxxxxx0100 198.51.100.10 xxxxxxxx0199'
+  ) {
+    pass('a phone number immediately before an exempt token is masked');
+  } else {
+    fail(`phone before exempt token was ${beforeExempt} | ${beforeExemptThenPhone}`);
+  }
   const leadingIp = maskPhoneNumbersInText('198.51.100.10 is documentation');
   if (leadingIp === '198.51.100.10 is documentation') {
     pass('an IPv4 address at the start of a string stays');
   } else {
     fail(`leading address was masked: ${leadingIp}`);
   }
-  const leadingZeros = maskPhoneNumbersInText('saw 044.123.45.67 today');
-  if (!leadingZeros.includes('044.123.45.67') && !leadingZeros.includes('044') && leadingZeros.includes('5.67')) {
+  const leadingZeros = maskPhoneNumbersInText('saw 000.123.45.67 today');
+  if (!leadingZeros.includes('000.123.45.67') && !leadingZeros.includes('000') && leadingZeros.includes('5.67')) {
     pass('a leading-zero dotted quad is masked');
   } else {
     fail(`leading-zero quad was kept: ${leadingZeros}`);
+  }
+  const dottedCorpus = [
+    ['198.51.100.10', '198.51.100.10', 'IPv4'],
+    ['000.123.45.67', 'xxxxxxxx5.67', 'IPv4 with leading zeros'],
+    ['2026-09-26', '2026-09-26', 'calendar date'],
+    ['2026.09.26', '2026.09.26', 'dotted calendar date'],
+    ['1.2.3', '1.2.3', 'version'],
+    ['v1.2.3', 'v1.2.3', 'version with a letter'],
+    ['10.20.30', '10.20.30', 'version under 7 digits'],
+    ['555.555.0100', 'xxxxxxxx0100', 'dotted phone'],
+    ['555.0100', 'xxxx0100', 'short dotted phone'],
+    ['123.45.67.89', '123.45.67.89', 'known residual treated as IPv4'],
+  ];
+  const corpusMisses = [];
+  for (const [raw, expected, label] of dottedCorpus) {
+    const masked = maskPhoneNumbersInText(`saw ${raw} today`);
+    if (masked !== `saw ${expected} today`) corpusMisses.push(`${label}: ${masked}`);
+  }
+  const mixedDotted = maskPhoneNumbersInText(
+    'version 1.2.3 at 2026-09-26 from 198.51.100.10 phone 555.555.0100 quad 000.123.45.67 residual 123.45.67.89'
+  );
+  if (
+    mixedDotted !==
+    'version 1.2.3 at 2026-09-26 from 198.51.100.10 phone xxxxxxxx0100 quad xxxxxxxx5.67 residual 123.45.67.89'
+  ) {
+    corpusMisses.push(`mixed: ${mixedDotted}`);
+  }
+  if (corpusMisses.length === 0) {
+    pass('dotted tokens keep IPv4, leading-zero IPv4, dates, versions, dotted phones, and the 123.45.67.89 IPv4 residual');
+  } else {
+    fail(`dotted token corpus changed: ${corpusMisses.join(' | ')}`);
   }
   const epochEdge = maskPhoneNumbersInText('at 1000000000000 and 2100000000000 then 2100000000001');
   if (
