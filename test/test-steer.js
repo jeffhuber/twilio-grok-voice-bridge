@@ -4,7 +4,8 @@
 process.env.BRIDGE_API_KEY = process.env.BRIDGE_API_KEY || 'ci-test-key';
 
 const http = require('http');
-const { app, applyOperatorSteer } = require('../src/server.js');
+const WebSocket = require('ws');
+const { app, applyOperatorSteer, createSession } = require('../src/server.js');
 
 const KEY = process.env.BRIDGE_API_KEY;
 let failed = 0;
@@ -135,6 +136,40 @@ async function main() {
   const missingSession = await post({ callSid: 'call-1', text: 'hello', respond: false }, auth);
   if (missingSession.status === 404) pass('boolean false with no session is 404, not 400');
   else fail(`false without session status ${missingSession.status}`);
+
+  const session = createSession({
+    callSid: 'call-1',
+    goal: 'Book a table for two',
+    context: 'weekday evening',
+    style: 'support',
+  });
+  const sent = [];
+  session.grokWs = {
+    readyState: WebSocket.OPEN,
+    send(payload) {
+      sent.push(JSON.parse(payload));
+    },
+  };
+  const seeded = await post({ callSid: 'call-1', text: 'stay quiet', respond: false }, auth);
+  let seededBody = {};
+  try {
+    seededBody = JSON.parse(seeded.body);
+  } catch (err) {
+    fail(`seeded /steer body was not JSON: ${seeded.body}`);
+  }
+  const seededCounts = counts(sent);
+  if (
+    seeded.status === 200 &&
+    seededBody.respond === false &&
+    seededCounts.update === 1 &&
+    seededCounts.create === 0
+  ) {
+    pass('POST /steer with a seeded session and respond false does not speak');
+  } else {
+    fail(
+      `seeded respond false status ${seeded.status} body ${seeded.body} counts ${JSON.stringify(seededCounts)}`
+    );
+  }
 
   if (failed > 0) {
     console.error(`\n${failed} steer test(s) failed`);

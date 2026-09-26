@@ -1860,4 +1860,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { app, validateSteerRespond, applyOperatorSteer };
+module.exports = { app, validateSteerRespond, applyOperatorSteer, createSession };
