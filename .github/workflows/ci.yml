@@ -48,6 +48,13 @@ jobs:
           echo "=== Running privacy defaults test ==="
           bash scripts/test-privacy-defaults.sh
 
+      - name: Run steer respond tests
+        env:
+          BRIDGE_API_KEY: ci-test-key
+        run: |
+          echo "=== Running steer respond tests ==="
+          node test/test-steer.js
+
       - name: Run media secret tests
         env:
           BRIDGE_API_KEY: ci-test-key
