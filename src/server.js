@@ -8,6 +8,7 @@
 
 // Shell NODE_ENV, captured before dotenv. NODE_ENV=test in .env must not export test hooks.
 const nodeEnvFromShell = process.env.NODE_ENV;
+const nodeOptionsBeforeDotenv = process.env.NODE_OPTIONS;
 require('dotenv').config({ override: true });
 
 const crypto = require('crypto');
@@ -2518,7 +2519,25 @@ module.exports = {
 // Test seams stay off unless the shell had NODE_ENV=test before this module
 // loaded. nodeEnvFromShell is that value, captured before dotenv, so
 // NODE_ENV=test in .env does not export these setters.
-if (nodeEnvFromShell === 'test') {
+// Refuse export when dotenv was preloaded via -r dotenv/config or NODE_OPTIONS.
+function isDotenvPreloaded() {
+  if (Array.isArray(process.execArgv)) {
+    for (let i = 0; i < process.execArgv.length; i++) {
+      const arg = process.execArgv[i];
+      if (arg === '-r' || arg === '--require') {
+        const next = process.execArgv[i + 1];
+        if (next && next.includes('dotenv/config')) return true;
+        i++;
+      } else if (arg.startsWith('-r') || arg.startsWith('--require=')) {
+        if (arg.includes('dotenv/config')) return true;
+      }
+    }
+  }
+  const opts = nodeOptionsBeforeDotenv;
+  if (typeof opts === 'string' && opts.includes('dotenv/config')) return true;
+  return false;
+}
+if (nodeEnvFromShell === 'test' && !isDotenvPreloaded()) {
   module.exports.setTwilioClientForTests = setTwilioClientForTests;
   module.exports.setGrokRealtimeUrlForTests = setGrokRealtimeUrlForTests;
 }

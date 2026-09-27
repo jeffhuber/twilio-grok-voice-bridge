@@ -4,8 +4,100 @@
 const fs = require('fs');
 const path = require('path');
 
+/**
+ * Strip line comments and block comments from source.
+ * Skips over strings and template literals to avoid treating
+ * comment-like syntax inside them as actual comments.
+ */
+function stripComments(src) {
+  let out = '';
+  let i = 0;
+  while (i < src.length) {
+    const ch = src[i];
+    // Skip strings
+    if (ch === '"' || ch === "'" || ch === '`') {
+      const quote = ch;
+      out += ch;
+      i++;
+      while (i < src.length) {
+        if (src[i] === '\\') {
+          out += src[i];
+          i++;
+          if (i < src.length) {
+            out += src[i];
+            i++;
+          }
+          continue;
+        }
+        if (src[i] === quote) {
+          out += src[i];
+          i++;
+          break;
+        }
+        out += src[i];
+        i++;
+      }
+      continue;
+    }
+    // Line comment
+    if (ch === '/' && src[i + 1] === '/') {
+      const nl = src.indexOf('\n', i);
+      if (nl === -1) break;
+      out += '\n';
+      i = nl + 1;
+      continue;
+    }
+    // Block comment
+    if (ch === '/' && src[i + 1] === '*') {
+      const end = src.indexOf('*/', i + 2);
+      if (end === -1) {
+        i = src.length;
+        break;
+      }
+      const block = src.slice(i, end + 2);
+      out += block.replace(/[^\n]/g, ' ');
+      i = end + 2;
+      continue;
+    }
+    out += ch;
+    i++;
+  }
+  return out;
+}
+
+// Self-test: prove the stripper removes comments
+(function testStripComments() {
+  const fake = [
+    'const nodeEnvFromShell = process.env.NODE_ENV;',
+    '// const nodeEnvFromShell = process.env.NODE_ENV;',
+    'if (nodeEnvFromShell === \'test\') {',
+    '  /* if (nodeEnvFromShell === \'test\') { */',
+    '  module.exports.setTwilioClientForTests = setTwilioClientForTests;',
+    '}',
+  ].join('\n');
+  const stripped = stripComments(fake);
+  if (stripped.includes('const nodeEnvFromShell = process.env.NODE_ENV;') &&
+      !stripped.match(/\/\/.*const nodeEnvFromShell/)) {
+    // pass
+  } else {
+    console.error('stripComments self-test failed: real line should remain');
+    process.exit(1);
+  }
+  const fakeCommented = [
+    '// const nodeEnvFromShell = process.env.NODE_ENV;',
+    '/* if (nodeEnvFromShell === \'test\') { */',
+  ].join('\n');
+  const strippedCommented = stripComments(fakeCommented);
+  if (strippedCommented.includes('const nodeEnvFromShell = process.env.NODE_ENV;') ||
+      strippedCommented.includes('if (nodeEnvFromShell')) {
+    console.error('stripComments self-test failed: commented lines should be removed');
+    process.exit(1);
+  }
+})();
+
 const root = path.join(__dirname, '..');
-const code = fs.readFileSync(path.join(root, 'src/server.js'), 'utf8');
+const codeRaw = fs.readFileSync(path.join(root, 'src/server.js'), 'utf8');
+const code = stripComments(codeRaw);
 const example = fs.readFileSync(path.join(root, '.env.example'), 'utf8');
 const readme = fs.readFileSync(path.join(root, 'README.md'), 'utf8');
 
@@ -180,19 +272,27 @@ if (
 if (
   !readme.includes('Never set `NODE_ENV=test` in `.env`') ||
   !readme.includes('The test hooks ignore `.env`') ||
+  !readme.includes('preloading dotenv') ||
+  !readme.includes('is refused') ||
   !example.includes('Never set NODE_ENV=test in .env') ||
-  !example.includes('The test hooks ignore .env')
+  !example.includes('The test hooks ignore .env') ||
+  !example.includes('preloading dotenv') ||
+  !example.includes('is refused')
 ) {
-  fail('docs do not say to keep NODE_ENV=test out of .env, or that the test hooks ignore .env');
-} else if (!code.includes('const nodeEnvFromShell = process.env.NODE_ENV;') || !code.includes('if (nodeEnvFromShell === \'test\')')) {
-  fail('src/server.js does not capture NODE_ENV before dotenv and gate the test setters on it');
+  fail('docs do not say to keep NODE_ENV=test out of .env, that the test hooks ignore .env, or that dotenv preload is refused');
+} else if (!code.includes('const nodeEnvFromShell = process.env.NODE_ENV;')) {
+  fail('src/server.js does not capture NODE_ENV before dotenv');
+} else if (!code.includes('isDotenvPreloaded') || !code.includes('!isDotenvPreloaded()')) {
+  fail('src/server.js does not check for dotenv preload in the gate');
+} else if (!code.includes('if (nodeEnvFromShell === \'test\'')) {
+  fail('src/server.js does not gate the test setters on nodeEnvFromShell');
 } else {
   const captureAt = code.indexOf('const nodeEnvFromShell = process.env.NODE_ENV;');
   const configAt = code.indexOf('.config({ override: true })');
   if (captureAt === -1 || configAt === -1 || captureAt > configAt) {
     fail('NODE_ENV is not captured before dotenv.config');
   } else {
-    pass('NODE_ENV=test in .env is documented as ignored by the test hooks');
+    pass('NODE_ENV=test in .env is documented as ignored by the test hooks, and dotenv preload is refused');
   }
 }
 

@@ -198,19 +198,19 @@ function probeSetterExport(nodeEnv, dotenvBody) {
       error: null,
     };
   }
-  if (dotenvBody != null) {
-    fs.writeFileSync(path.join(tmp, '.env'), dotenvBody, { mode: 0o600 });
-  }
-  const script = [
-    'const server = require(' + JSON.stringify(path.join(__dirname, '..', 'src', 'server.js')) + ');',
-    'const names = ["setTwilioClientForTests", "setGrokRealtimeUrlForTests"];',
-    'const leaked = names.filter((name) => typeof server[name] !== "undefined");',
-    'const nodeEnv = Object.prototype.hasOwnProperty.call(process.env, "NODE_ENV") ? process.env.NODE_ENV : null;',
-    'process.stdout.write(JSON.stringify({ leaked: leaked, nodeEnv: nodeEnv }));',
-    'process.exit(leaked.length ? 1 : 0);',
-  ].join('\n');
   let result;
   try {
+    if (dotenvBody != null) {
+      fs.writeFileSync(path.join(tmp, '.env'), dotenvBody, { mode: 0o600 });
+    }
+    const script = [
+      'const server = require(' + JSON.stringify(path.join(__dirname, '..', 'src', 'server.js')) + ');',
+      'const names = ["setTwilioClientForTests", "setGrokRealtimeUrlForTests"];',
+      'const leaked = names.filter((name) => typeof server[name] !== "undefined");',
+      'const nodeEnv = Object.prototype.hasOwnProperty.call(process.env, "NODE_ENV") ? process.env.NODE_ENV : null;',
+      'process.stdout.write(JSON.stringify({ leaked: leaked, nodeEnv: nodeEnv }));',
+      'process.exit(leaked.length ? 1 : 0);',
+    ].join('\n');
     result = spawnSync(process.execPath, ['-e', script], {
       cwd: tmp,
       env,
@@ -258,6 +258,47 @@ function assertSettersOmitted(label, nodeEnv, options) {
   fail(`${label}: ${problems.join('; ')}`);
 }
 
+function probeSetterExportWithPreload(nodeEnv, dotenvBody, options) {
+  const opts = options || {};
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'bridge-dotenv-'));
+  const env = childEnvForExportProbe(nodeEnv);
+  if (nodeEnv === undefined && Object.prototype.hasOwnProperty.call(env, 'NODE_ENV')) {
+    fs.rmSync(tmp, { recursive: true, force: true });
+    return {
+      status: 1,
+      stdout: '',
+      stderr: 'NODE_ENV was not deleted from the child environment',
+      error: null,
+    };
+  }
+  try {
+    if (dotenvBody != null) {
+      fs.writeFileSync(path.join(tmp, '.env'), dotenvBody, { mode: 0o600 });
+    }
+    const dotenvConfigPath = require.resolve('dotenv/config');
+    const script = [
+      'const server = require(' + JSON.stringify(path.join(__dirname, '..', 'src', 'server.js')) + ');',
+      'const names = ["setTwilioClientForTests", "setGrokRealtimeUrlForTests"];',
+      'const leaked = names.filter((name) => typeof server[name] !== "undefined");',
+      'const nodeEnv = Object.prototype.hasOwnProperty.call(process.env, "NODE_ENV") ? process.env.NODE_ENV : null;',
+      'process.stdout.write(JSON.stringify({ leaked: leaked, nodeEnv: nodeEnv }));',
+      'process.exit(leaked.length ? 1 : 0);',
+    ].join('\n');
+    const execArgv = opts.execArgv ? ['-r', dotenvConfigPath] : [];
+    if (opts.nodeOptions) {
+      env.NODE_OPTIONS = `--require ${dotenvConfigPath}`;
+    }
+    return spawnSync(process.execPath, [...execArgv, '-e', script], {
+      cwd: tmp,
+      env,
+      encoding: 'utf8',
+      timeout: 8000,
+    });
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+}
+
 function assertProductionExportOmitsTestSetters() {
   assertSettersOmitted('production module.exports omits test setters', 'production', {
     expectNodeEnv: 'production',
@@ -279,6 +320,71 @@ function assertProductionExportOmitsTestSetters() {
   });
 }
 
+function assertPreloadRefusesTestSetters() {
+  const dotenvTest = 'NODE_ENV=test\n';
+  // Positive case: shell NODE_ENV=test still exports them
+  const positiveResult = probeSetterExport('test', null);
+  if (positiveResult.error) {
+    fail(`dotenv preload positive case: ${positiveResult.error.message}`);
+    return;
+  }
+  let positiveReport = null;
+  try {
+    positiveReport = JSON.parse(positiveResult.stdout || '');
+  } catch {
+    positiveReport = null;
+  }
+  if (!positiveReport || !Array.isArray(positiveReport.leaked) || positiveReport.leaked.length === 0) {
+    fail('dotenv preload positive case: shell NODE_ENV=test did not export setters');
+    return;
+  }
+  pass('dotenv preload positive case: shell NODE_ENV=test exports setters');
+
+  // execArgv -r dotenv/config with .env of NODE_ENV=test
+  const execArgvResult = probeSetterExportWithPreload(undefined, dotenvTest, { execArgv: true });
+  if (execArgvResult.error) {
+    fail(`execArgv -r dotenv/config: ${execArgvResult.error.message}`);
+    return;
+  }
+  let execArgvReport = null;
+  try {
+    execArgvReport = JSON.parse(execArgvResult.stdout || '');
+  } catch {
+    execArgvReport = null;
+  }
+  if (!execArgvReport || !Array.isArray(execArgvReport.leaked)) {
+    fail('execArgv -r dotenv/config: child exited without a setter report');
+    return;
+  }
+  if (execArgvReport.leaked.length !== 0) {
+    fail(`execArgv -r dotenv/config: setters still exported (${execArgvReport.leaked.join(', ')})`);
+    return;
+  }
+  pass('execArgv -r dotenv/config omits test setters when .env sets NODE_ENV=test');
+
+  // NODE_OPTIONS=--require dotenv/config with .env of NODE_ENV=test
+  const nodeOptionsResult = probeSetterExportWithPreload(undefined, dotenvTest, { nodeOptions: true });
+  if (nodeOptionsResult.error) {
+    fail(`NODE_OPTIONS=--require dotenv/config: ${nodeOptionsResult.error.message}`);
+    return;
+  }
+  let nodeOptionsReport = null;
+  try {
+    nodeOptionsReport = JSON.parse(nodeOptionsResult.stdout || '');
+  } catch {
+    nodeOptionsReport = null;
+  }
+  if (!nodeOptionsReport || !Array.isArray(nodeOptionsReport.leaked)) {
+    fail('NODE_OPTIONS=--require dotenv/config: child exited without a setter report');
+    return;
+  }
+  if (nodeOptionsReport.leaked.length !== 0) {
+    fail(`NODE_OPTIONS=--require dotenv/config: setters still exported (${nodeOptionsReport.leaked.join(', ')})`);
+    return;
+  }
+  pass('NODE_OPTIONS=--require dotenv/config omits test setters when .env sets NODE_ENV=test');
+}
+
 function assertMasked(label, raw, masked, last4) {
   if (!masked.includes(raw) && masked.includes(last4) && !/\d{7,}/.test(masked.replace(/x/g, ''))) {
     pass(label);
@@ -293,6 +399,7 @@ function assertMasked(label, raw, masked, last4) {
 
 async function main() {
   assertProductionExportOmitsTestSetters();
+  assertPreloadRefusesTestSetters();
 
   const samples = [
     ['555-0100', '0100'],
