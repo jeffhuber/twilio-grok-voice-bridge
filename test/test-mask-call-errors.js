@@ -12,7 +12,9 @@ delete process.env.TWILIO_FROM_NUMBER;
 
 const { spawnSync } = require('child_process');
 const crypto = require('crypto');
+const fs = require('fs');
 const http = require('http');
+const os = require('os');
 const path = require('path');
 const WebSocket = require('ws');
 
@@ -172,34 +174,109 @@ async function waitForLog(stderr, start, needle, ms) {
   return found;
 }
 
-function assertProductionExportOmitsTestSetters() {
-  const result = spawnSync(
-    process.execPath,
-    [
-      '-e',
-      [
-        "const server = require('./src/server.js');",
-        "const names = ['setTwilioClientForTests', 'setGrokRealtimeUrlForTests'];",
-        'const leaked = names.filter((name) => Object.prototype.hasOwnProperty.call(server, name));',
-        'if (leaked.length) { console.error(leaked.join(",")); process.exit(1); }',
-        'process.exit(0);',
-      ].join('\n'),
-    ],
-    {
-      cwd: path.join(__dirname, '..'),
-      env: Object.assign({}, process.env, {
-        NODE_ENV: 'production',
-        VOICE_ALIASES: '',
-      }),
+function childEnvForExportProbe(nodeEnv) {
+  const env = Object.assign({}, process.env, {
+    VOICE_ALIASES: '',
+    PUBLIC_HOST: 'bridge.example.com',
+  });
+  delete env.DOTENV_KEY;
+  if (!env.BRIDGE_API_KEY) env.BRIDGE_API_KEY = 'operator-test-key';
+  if (nodeEnv === undefined) delete env.NODE_ENV;
+  else env.NODE_ENV = nodeEnv;
+  return env;
+}
+
+function probeSetterExport(nodeEnv, dotenvBody) {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'bridge-dotenv-'));
+  const env = childEnvForExportProbe(nodeEnv);
+  if (nodeEnv === undefined && Object.prototype.hasOwnProperty.call(env, 'NODE_ENV')) {
+    fs.rmSync(tmp, { recursive: true, force: true });
+    return {
+      status: 1,
+      stdout: '',
+      stderr: 'NODE_ENV was not deleted from the child environment',
+      error: null,
+    };
+  }
+  if (dotenvBody != null) {
+    fs.writeFileSync(path.join(tmp, '.env'), dotenvBody, { mode: 0o600 });
+  }
+  const script = [
+    'const server = require(' + JSON.stringify(path.join(__dirname, '..', 'src', 'server.js')) + ');',
+    'const names = ["setTwilioClientForTests", "setGrokRealtimeUrlForTests"];',
+    'const leaked = names.filter((name) => typeof server[name] !== "undefined");',
+    'const nodeEnv = Object.prototype.hasOwnProperty.call(process.env, "NODE_ENV") ? process.env.NODE_ENV : null;',
+    'process.stdout.write(JSON.stringify({ leaked: leaked, nodeEnv: nodeEnv }));',
+    'process.exit(leaked.length ? 1 : 0);',
+  ].join('\n');
+  let result;
+  try {
+    result = spawnSync(process.execPath, ['-e', script], {
+      cwd: tmp,
+      env,
       encoding: 'utf8',
       timeout: 8000,
-    }
-  );
-  if (result.status === 0) {
-    pass('production module.exports omits test setters');
+    });
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+  return result;
+}
+
+function assertSettersOmitted(label, nodeEnv, options) {
+  const opts = options || {};
+  const result = probeSetterExport(nodeEnv, opts.dotenvBody);
+  if (result.error) {
+    fail(`${label}: ${result.error.message}`);
     return;
   }
-  fail(`production module.exports still has test setters (${result.status}): ${result.stderr || result.stdout}`);
+  let report = null;
+  try {
+    report = JSON.parse(result.stdout || '');
+  } catch {
+    report = null;
+  }
+  if (!report || !Array.isArray(report.leaked)) {
+    const detail = (result.stderr || result.stdout || '').trim();
+    fail(`${label}: child exited ${result.status} without a setter report${detail ? `: ${detail}` : ''}`);
+    return;
+  }
+  const problems = [];
+  if (report.leaked.length !== 0) {
+    problems.push(`setters still exported (${report.leaked.join(', ')})`);
+  }
+  if (Object.prototype.hasOwnProperty.call(opts, 'expectNodeEnv') && report.nodeEnv !== opts.expectNodeEnv) {
+    problems.push(`process.env.NODE_ENV after load was ${String(report.nodeEnv)}`);
+  }
+  if (problems.length === 0 && result.status !== 0) {
+    problems.push(`child exited ${result.status}`);
+  }
+  if (problems.length === 0) {
+    pass(label);
+    return;
+  }
+  fail(`${label}: ${problems.join('; ')}`);
+}
+
+function assertProductionExportOmitsTestSetters() {
+  assertSettersOmitted('production module.exports omits test setters', 'production', {
+    expectNodeEnv: 'production',
+  });
+  // Shell NODE_ENV is deleted or set to development. Each child also gets a
+  // temp .env of NODE_ENV=test. Override still copies that into process.env.
+  // The setters stay undefined because the gate uses the shell value from
+  // before dotenv. These fail if the gate is !== 'production' (the shell
+  // value is not production) and if the gate reads process.env after dotenv
+  // (the file has set NODE_ENV=test).
+  const dotenvTest = 'NODE_ENV=test\n';
+  assertSettersOmitted('unset NODE_ENV omits test setters when .env sets NODE_ENV=test', undefined, {
+    dotenvBody: dotenvTest,
+    expectNodeEnv: 'test',
+  });
+  assertSettersOmitted('development NODE_ENV omits test setters when .env sets NODE_ENV=test', 'development', {
+    dotenvBody: dotenvTest,
+    expectNodeEnv: 'test',
+  });
 }
 
 function assertMasked(label, raw, masked, last4) {

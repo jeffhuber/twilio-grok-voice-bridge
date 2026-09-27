@@ -354,7 +354,9 @@ async function main() {
   if (
     readme.includes('`mediaAuthDedicated` stays') &&
     readme.includes('dedicated `MEDIA_STREAM_SECRET`') &&
-    readme.includes('only a boolean')
+    readme.includes('only a boolean') &&
+    readme.includes('operator can confirm') &&
+    readme.includes('without revealing either secret')
   ) {
     pass('README explains why /health keeps mediaAuthDedicated');
   } else {

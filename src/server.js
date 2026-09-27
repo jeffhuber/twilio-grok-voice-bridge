@@ -6,6 +6,8 @@
  */
 'use strict';
 
+// Shell NODE_ENV, captured before dotenv. NODE_ENV=test in .env must not export test hooks.
+const nodeEnvFromShell = process.env.NODE_ENV;
 require('dotenv').config({ override: true });
 
 const crypto = require('crypto');
@@ -1748,9 +1750,8 @@ app.get('/health', (_req, res) => {
     contactConfigured: Boolean(getContact().fullName || getContact().mobile),
     authRequired: Boolean(BRIDGE_API_KEY),
     hmacAuth: Boolean(mediaAuthSecret()),
-    // Boolean only. test/test-media-secret.js reads this to tell a dedicated
-    // MEDIA_STREAM_SECRET from the BRIDGE_API_KEY fallback. The body does not
-    // include either secret, so the flag stays on /health.
+    // Boolean only. An operator can confirm a dedicated MEDIA_STREAM_SECRET
+    // is configured rather than the operator-key fallback, without either secret.
     mediaAuthDedicated: mediaAuthUsesDedicatedSecret(),
   });
 });
@@ -2514,9 +2515,10 @@ module.exports = {
   stripDeliveryTags,
 };
 
-// Test seams stay off the production export. Tests and CI set NODE_ENV=test
-// before requiring this module.
-if (process.env.NODE_ENV === 'test') {
+// Test seams stay off unless the shell had NODE_ENV=test before this module
+// loaded. nodeEnvFromShell is that value, captured before dotenv, so
+// NODE_ENV=test in .env does not export these setters.
+if (nodeEnvFromShell === 'test') {
   module.exports.setTwilioClientForTests = setTwilioClientForTests;
   module.exports.setGrokRealtimeUrlForTests = setGrokRealtimeUrlForTests;
 }
