@@ -281,12 +281,21 @@ function probeSetterExportWithPreload(nodeEnv, dotenvBody, options) {
       'const names = ["setTwilioClientForTests", "setGrokRealtimeUrlForTests"];',
       'const leaked = names.filter((name) => typeof server[name] !== "undefined");',
       'const nodeEnv = Object.prototype.hasOwnProperty.call(process.env, "NODE_ENV") ? process.env.NODE_ENV : null;',
-      'process.stdout.write(JSON.stringify({ leaked: leaked, nodeEnv: nodeEnv }));',
+      'const sentinel = process.env.DOTENV_PRELOAD_SENTINEL || null;',
+      'process.stdout.write(JSON.stringify({ leaked: leaked, nodeEnv: nodeEnv, sentinel: sentinel }));',
       'process.exit(leaked.length ? 1 : 0);',
     ].join('\n');
-    const execArgv = opts.execArgv ? ['-r', dotenvConfigPath] : [];
-    if (opts.nodeOptions) {
+    let execArgv = [];
+    if (opts.preloadType === 'require-execArgv') {
+      execArgv = ['-r', dotenvConfigPath];
+    } else if (opts.preloadType === 'import-execArgv') {
+      execArgv = ['--import', dotenvConfigPath];
+    } else if (opts.preloadType === 'env-file-execArgv') {
+      execArgv = ['--env-file', path.join(tmp, '.env')];
+    } else if (opts.preloadType === 'require-nodeOptions') {
       env.NODE_OPTIONS = `--require ${dotenvConfigPath}`;
+    } else if (opts.preloadType === 'import-nodeOptions') {
+      env.NODE_OPTIONS = `--import ${dotenvConfigPath}`;
     }
     return spawnSync(process.execPath, [...execArgv, '-e', script], {
       cwd: tmp,
@@ -321,68 +330,74 @@ function assertProductionExportOmitsTestSetters() {
 }
 
 function assertPreloadRefusesTestSetters() {
-  const dotenvTest = 'NODE_ENV=test\n';
+  const dotenvTest = 'NODE_ENV=test\nDOTENV_PRELOAD_SENTINEL=loaded\n';
+  const failures = [];
+  
   // Positive case: shell NODE_ENV=test still exports them
   const positiveResult = probeSetterExport('test', null);
   if (positiveResult.error) {
-    fail(`dotenv preload positive case: ${positiveResult.error.message}`);
-    return;
+    failures.push(`dotenv preload positive case: ${positiveResult.error.message}`);
+  } else {
+    let positiveReport = null;
+    try {
+      positiveReport = JSON.parse(positiveResult.stdout || '');
+    } catch {
+      positiveReport = null;
+    }
+    if (!positiveReport || !Array.isArray(positiveReport.leaked) || positiveReport.leaked.length === 0) {
+      failures.push('dotenv preload positive case: shell NODE_ENV=test did not export setters');
+    } else {
+      pass('dotenv preload positive case: shell NODE_ENV=test exports setters');
+    }
   }
-  let positiveReport = null;
-  try {
-    positiveReport = JSON.parse(positiveResult.stdout || '');
-  } catch {
-    positiveReport = null;
-  }
-  if (!positiveReport || !Array.isArray(positiveReport.leaked) || positiveReport.leaked.length === 0) {
-    fail('dotenv preload positive case: shell NODE_ENV=test did not export setters');
-    return;
-  }
-  pass('dotenv preload positive case: shell NODE_ENV=test exports setters');
 
-  // execArgv -r dotenv/config with .env of NODE_ENV=test
-  const execArgvResult = probeSetterExportWithPreload(undefined, dotenvTest, { execArgv: true });
-  if (execArgvResult.error) {
-    fail(`execArgv -r dotenv/config: ${execArgvResult.error.message}`);
-    return;
-  }
-  let execArgvReport = null;
-  try {
-    execArgvReport = JSON.parse(execArgvResult.stdout || '');
-  } catch {
-    execArgvReport = null;
-  }
-  if (!execArgvReport || !Array.isArray(execArgvReport.leaked)) {
-    fail('execArgv -r dotenv/config: child exited without a setter report');
-    return;
-  }
-  if (execArgvReport.leaked.length !== 0) {
-    fail(`execArgv -r dotenv/config: setters still exported (${execArgvReport.leaked.join(', ')})`);
-    return;
-  }
-  pass('execArgv -r dotenv/config omits test setters when .env sets NODE_ENV=test');
+  // Test each preload variant
+  // Note: --env-file only works via execArgv, not NODE_OPTIONS (Node.js restriction)
+  const variants = [
+    { preloadType: 'require-execArgv', label: 'execArgv -r dotenv/config' },
+    { preloadType: 'import-execArgv', label: 'execArgv --import dotenv/config' },
+    { preloadType: 'env-file-execArgv', label: 'execArgv --env-file .env' },
+    { preloadType: 'require-nodeOptions', label: 'NODE_OPTIONS --require dotenv/config' },
+    { preloadType: 'import-nodeOptions', label: 'NODE_OPTIONS --import dotenv/config' },
+  ];
 
-  // NODE_OPTIONS=--require dotenv/config with .env of NODE_ENV=test
-  const nodeOptionsResult = probeSetterExportWithPreload(undefined, dotenvTest, { nodeOptions: true });
-  if (nodeOptionsResult.error) {
-    fail(`NODE_OPTIONS=--require dotenv/config: ${nodeOptionsResult.error.message}`);
-    return;
+  for (const variant of variants) {
+    const result = probeSetterExportWithPreload(undefined, dotenvTest, variant);
+    if (result.error) {
+      failures.push(`${variant.label}: ${result.error.message}`);
+      continue;
+    }
+    let report = null;
+    try {
+      report = JSON.parse(result.stdout || '');
+    } catch {
+      report = null;
+    }
+    if (!report || !Array.isArray(report.leaked)) {
+      failures.push(`${variant.label}: child exited without a setter report`);
+      continue;
+    }
+    
+    // Positively assert the preload took effect
+    const preloadTookEffect = report.nodeEnv === 'test' || report.sentinel === 'loaded';
+    if (!preloadTookEffect) {
+      failures.push(`${variant.label}: preload did not take effect (nodeEnv=${report.nodeEnv}, sentinel=${report.sentinel})`);
+      continue;
+    }
+    
+    if (report.leaked.length !== 0) {
+      failures.push(`${variant.label}: setters still exported (${report.leaked.join(', ')}) despite preload`);
+      continue;
+    }
+    
+    pass(`${variant.label} omits test setters when .env sets NODE_ENV=test`);
   }
-  let nodeOptionsReport = null;
-  try {
-    nodeOptionsReport = JSON.parse(nodeOptionsResult.stdout || '');
-  } catch {
-    nodeOptionsReport = null;
+
+  if (failures.length > 0) {
+    for (const failure of failures) {
+      fail(failure);
+    }
   }
-  if (!nodeOptionsReport || !Array.isArray(nodeOptionsReport.leaked)) {
-    fail('NODE_OPTIONS=--require dotenv/config: child exited without a setter report');
-    return;
-  }
-  if (nodeOptionsReport.leaked.length !== 0) {
-    fail(`NODE_OPTIONS=--require dotenv/config: setters still exported (${nodeOptionsReport.leaked.join(', ')})`);
-    return;
-  }
-  pass('NODE_OPTIONS=--require dotenv/config omits test setters when .env sets NODE_ENV=test');
 }
 
 function assertMasked(label, raw, masked, last4) {

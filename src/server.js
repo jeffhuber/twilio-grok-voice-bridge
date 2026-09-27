@@ -2519,22 +2519,45 @@ module.exports = {
 // Test seams stay off unless the shell had NODE_ENV=test before this module
 // loaded. nodeEnvFromShell is that value, captured before dotenv, so
 // NODE_ENV=test in .env does not export these setters.
-// Refuse export when dotenv was preloaded via -r dotenv/config or NODE_OPTIONS.
+// Refuse export when dotenv was preloaded via -r/--require/--import dotenv/config
+// (relative or absolute path) or --env-file in process.execArgv or NODE_OPTIONS.
 function isDotenvPreloaded() {
+  function checkArg(arg) {
+    // --env-file, --env-file=path, --env-file-if-exists
+    if (arg === '--env-file' || arg.startsWith('--env-file=') || arg === '--env-file-if-exists') {
+      return true;
+    }
+    // -r, --require, --import with dotenv/config (relative or absolute path)
+    if (arg.includes('dotenv/config') || arg.includes('dotenv\\config')) {
+      return true;
+    }
+    return false;
+  }
   if (Array.isArray(process.execArgv)) {
     for (let i = 0; i < process.execArgv.length; i++) {
       const arg = process.execArgv[i];
-      if (arg === '-r' || arg === '--require') {
+      if (checkArg(arg)) return true;
+      // Check next arg for -r, --require, --import
+      if (arg === '-r' || arg === '--require' || arg === '--import') {
         const next = process.execArgv[i + 1];
-        if (next && next.includes('dotenv/config')) return true;
+        if (next && checkArg(next)) return true;
         i++;
-      } else if (arg.startsWith('-r') || arg.startsWith('--require=')) {
-        if (arg.includes('dotenv/config')) return true;
       }
     }
   }
   const opts = nodeOptionsBeforeDotenv;
-  if (typeof opts === 'string' && opts.includes('dotenv/config')) return true;
+  if (typeof opts === 'string') {
+    const tokens = opts.split(/\s+/);
+    for (let i = 0; i < tokens.length; i++) {
+      const token = tokens[i];
+      if (checkArg(token)) return true;
+      if (token === '-r' || token === '--require' || token === '--import') {
+        const next = tokens[i + 1];
+        if (next && checkArg(next)) return true;
+        i++;
+      }
+    }
+  }
   return false;
 }
 if (nodeEnvFromShell === 'test' && !isDotenvPreloaded()) {
