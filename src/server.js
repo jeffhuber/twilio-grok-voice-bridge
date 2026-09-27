@@ -8,6 +8,7 @@
 
 // Shell NODE_ENV, captured before dotenv. NODE_ENV=test in .env must not export test hooks.
 const nodeEnvFromShell = process.env.NODE_ENV;
+const nodeOptionsBeforeDotenv = process.env.NODE_OPTIONS;
 require('dotenv').config({ override: true });
 
 const crypto = require('crypto');
@@ -2518,7 +2519,50 @@ module.exports = {
 // Test seams stay off unless the shell had NODE_ENV=test before this module
 // loaded. nodeEnvFromShell is that value, captured before dotenv, so
 // NODE_ENV=test in .env does not export these setters.
-if (nodeEnvFromShell === 'test') {
+// Refuse export when dotenv was preloaded via -r/--require/--import dotenv/config
+// (relative or absolute path) or --env-file in process.execArgv or NODE_OPTIONS.
+function isDotenvPreloaded() {
+  function checkArg(arg) {
+    // --env-file* covers all forms: --env-file, --env-file=path, --env-file-if-exists, etc.
+    if (arg.startsWith('--env-file')) {
+      return true;
+    }
+    // -r, --require, --import with dotenv/config (relative or absolute path)
+    if (arg.includes('dotenv/config') || arg.includes('dotenv\\config')) {
+      return true;
+    }
+    return false;
+  }
+  if (Array.isArray(process.execArgv)) {
+    for (let i = 0; i < process.execArgv.length; i++) {
+      const arg = process.execArgv[i];
+      if (checkArg(arg)) return true;
+      // Early-exit optimization: check the next arg when this one is -r/--require/--import.
+      // Redundant (the loop will check it anyway), but avoids advancing when we know to refuse.
+      if (arg === '-r' || arg === '--require' || arg === '--import') {
+        const next = process.execArgv[i + 1];
+        if (next && checkArg(next)) return true;
+        i++;
+      }
+    }
+  }
+  const opts = nodeOptionsBeforeDotenv;
+  if (typeof opts === 'string') {
+    const tokens = opts.split(/\s+/);
+    for (let i = 0; i < tokens.length; i++) {
+      const token = tokens[i];
+      if (checkArg(token)) return true;
+      // Early-exit optimization: same as above for NODE_OPTIONS tokens
+      if (token === '-r' || token === '--require' || token === '--import') {
+        const next = tokens[i + 1];
+        if (next && checkArg(next)) return true;
+        i++;
+      }
+    }
+  }
+  return false;
+}
+if (nodeEnvFromShell === 'test' && !isDotenvPreloaded()) {
   module.exports.setTwilioClientForTests = setTwilioClientForTests;
   module.exports.setGrokRealtimeUrlForTests = setGrokRealtimeUrlForTests;
 }

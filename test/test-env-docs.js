@@ -4,8 +4,201 @@
 const fs = require('fs');
 const path = require('path');
 
+/**
+ * Strip line comments and block comments from source.
+ * Skips over strings, template literals, and regex literals to avoid treating
+ * comment-like syntax inside them as actual comments.
+ * Uses a simple previous-token heuristic to detect regex literals.
+ */
+function stripComments(src) {
+  let out = '';
+  let i = 0;
+  let lastTokenEnd = -1;
+  // Token types that can precede a regex literal
+  const regexPreceders = /^(return|throw|case|in|of|typeof|instanceof|new|void|delete|do|if|else|switch|while|for|with|yield|await|[=\(\[,;:!&|\?\+\-\*\/%<>^~]|\bfunction\b)$/;
+  
+  function lastToken() {
+    if (lastTokenEnd < 0) return '';
+    let j = lastTokenEnd;
+    while (j >= 0 && /\s/.test(out[j])) j--;
+    if (j < 0) return '';
+    let k = j;
+    while (k >= 0 && /\w/.test(out[k])) k--;
+    if (k < j) return out.slice(k + 1, j + 1);
+    return out[j];
+  }
+  
+  while (i < src.length) {
+    const ch = src[i];
+    // Skip strings
+    if (ch === '"' || ch === "'") {
+      const quote = ch;
+      out += ch;
+      i++;
+      while (i < src.length) {
+        if (src[i] === '\\') {
+          out += src[i];
+          i++;
+          if (i < src.length) {
+            out += src[i];
+            i++;
+          }
+          continue;
+        }
+        if (src[i] === quote) {
+          out += src[i];
+          i++;
+          break;
+        }
+        out += src[i];
+        i++;
+      }
+      lastTokenEnd = out.length - 1;
+      continue;
+    }
+    // Template literal
+    if (ch === '`') {
+      out += ch;
+      i++;
+      while (i < src.length) {
+        if (src[i] === '\\') {
+          out += src[i];
+          i++;
+          if (i < src.length) {
+            out += src[i];
+            i++;
+          }
+          continue;
+        }
+        if (src[i] === '`') {
+          out += src[i];
+          i++;
+          break;
+        }
+        out += src[i];
+        i++;
+      }
+      lastTokenEnd = out.length - 1;
+      continue;
+    }
+    // Regex literal (heuristic: / after a regex-preceder token)
+    if (ch === '/' && src[i + 1] !== '/' && src[i + 1] !== '*') {
+      const prev = lastToken();
+      if (regexPreceders.test(prev)) {
+        out += ch;
+        i++;
+        while (i < src.length) {
+          if (src[i] === '\\') {
+            out += src[i];
+            i++;
+            if (i < src.length) {
+              out += src[i];
+              i++;
+            }
+            continue;
+          }
+          if (src[i] === '/') {
+            out += src[i];
+            i++;
+            // Consume flags
+            while (i < src.length && /[gimsuvy]/.test(src[i])) {
+              out += src[i];
+              i++;
+            }
+            break;
+          }
+          if (src[i] === '\n') {
+            // Unterminated regex, not a regex
+            break;
+          }
+          out += src[i];
+          i++;
+        }
+        lastTokenEnd = out.length - 1;
+        continue;
+      }
+    }
+    // Line comment
+    if (ch === '/' && src[i + 1] === '/') {
+      const nl = src.indexOf('\n', i);
+      if (nl === -1) break;
+      out += '\n';
+      i = nl + 1;
+      continue;
+    }
+    // Block comment
+    if (ch === '/' && src[i + 1] === '*') {
+      const end = src.indexOf('*/', i + 2);
+      if (end === -1) {
+        i = src.length;
+        break;
+      }
+      const block = src.slice(i, end + 2);
+      out += block.replace(/[^\n]/g, ' ');
+      i = end + 2;
+      continue;
+    }
+    out += ch;
+    if (!/\s/.test(ch)) lastTokenEnd = out.length - 1;
+    i++;
+  }
+  return out;
+}
+
+// Self-test: prove the stripper removes comments and handles regex literals
+(function testStripComments() {
+  const fake = [
+    'const nodeEnvFromShell = process.env.NODE_ENV;',
+    '// const nodeEnvFromShell = process.env.NODE_ENV;',
+    'if (nodeEnvFromShell === \'test\') {',
+    '  /* if (nodeEnvFromShell === \'test\') { */',
+    '  module.exports.setTwilioClientForTests = setTwilioClientForTests;',
+    '}',
+  ].join('\n');
+  const stripped = stripComments(fake);
+  if (stripped.includes('const nodeEnvFromShell = process.env.NODE_ENV;') &&
+      !stripped.match(/\/\/.*const nodeEnvFromShell/)) {
+    // pass
+  } else {
+    console.error('stripComments self-test failed: real line should remain');
+    process.exit(1);
+  }
+  const fakeCommented = [
+    '// const nodeEnvFromShell = process.env.NODE_ENV;',
+    '/* if (nodeEnvFromShell === \'test\') { */',
+  ].join('\n');
+  const strippedCommented = stripComments(fakeCommented);
+  if (strippedCommented.includes('const nodeEnvFromShell = process.env.NODE_ENV;') ||
+      strippedCommented.includes('if (nodeEnvFromShell')) {
+    console.error('stripComments self-test failed: commented lines should be removed');
+    process.exit(1);
+  }
+  // Test regex literal with escaped slashes (as they appear in source)
+  const regexTwoSlashes = String.raw`const re = /https:\/\/example\.com/;`;
+  const strippedRegex = stripComments(regexTwoSlashes);
+  if (!strippedRegex.includes(String.raw`https:\/\/`)) {
+    console.error('stripComments self-test failed: regex with escaped slashes should remain');
+    process.exit(1);
+  }
+  // Test regex literal with quote (raw source)
+  const regexQuote = String.raw`if (/["']/.test(str)) return;`;
+  const strippedQuote = stripComments(regexQuote);
+  if (!strippedQuote.includes(String.raw`["']`)) {
+    console.error('stripComments self-test failed: regex with quote should remain');
+    process.exit(1);
+  }
+  // Test that division is not treated as regex
+  const division = 'const x = 10 / 2; // comment';
+  const strippedDiv = stripComments(division);
+  if (!strippedDiv.includes('10 / 2') || strippedDiv.includes('// comment')) {
+    console.error('stripComments self-test failed: division should remain, comment should be stripped');
+    process.exit(1);
+  }
+})();
+
 const root = path.join(__dirname, '..');
-const code = fs.readFileSync(path.join(root, 'src/server.js'), 'utf8');
+const codeRaw = fs.readFileSync(path.join(root, 'src/server.js'), 'utf8');
+const code = stripComments(codeRaw);
 const example = fs.readFileSync(path.join(root, '.env.example'), 'utf8');
 const readme = fs.readFileSync(path.join(root, 'README.md'), 'utf8');
 
@@ -179,20 +372,30 @@ if (
 
 if (
   !readme.includes('Never set `NODE_ENV=test` in `.env`') ||
-  !readme.includes('The test hooks ignore `.env`') ||
+  !readme.includes('can\'t be told apart') ||
+  !readme.toLowerCase().includes('preload') ||
+  !readme.toLowerCase().includes('refuse') ||
+  !readme.includes('--env-file*') ||
+  !readme.includes('dotenv\'s own `config`') ||
   !example.includes('Never set NODE_ENV=test in .env') ||
-  !example.includes('The test hooks ignore .env')
+  !example.includes('can\'t be told apart') ||
+  !example.toLowerCase().includes('preload') ||
+  !example.toLowerCase().includes('refuse')
 ) {
-  fail('docs do not say to keep NODE_ENV=test out of .env, or that the test hooks ignore .env');
-} else if (!code.includes('const nodeEnvFromShell = process.env.NODE_ENV;') || !code.includes('if (nodeEnvFromShell === \'test\')')) {
-  fail('src/server.js does not capture NODE_ENV before dotenv and gate the test setters on it');
+  fail('docs do not say to keep NODE_ENV=test out of .env, that other preload forms can\'t be told apart, or that dotenv config and --env-file* are detected');
+} else if (!code.includes('const nodeEnvFromShell = process.env.NODE_ENV;')) {
+  fail('src/server.js does not capture NODE_ENV before dotenv');
+} else if (!code.includes('isDotenvPreloaded') || !code.includes('!isDotenvPreloaded()')) {
+  fail('src/server.js does not check for dotenv preload in the gate');
+} else if (!code.includes('if (nodeEnvFromShell === \'test\'')) {
+  fail('src/server.js does not gate the test setters on nodeEnvFromShell');
 } else {
   const captureAt = code.indexOf('const nodeEnvFromShell = process.env.NODE_ENV;');
   const configAt = code.indexOf('.config({ override: true })');
   if (captureAt === -1 || configAt === -1 || captureAt > configAt) {
     fail('NODE_ENV is not captured before dotenv.config');
   } else {
-    pass('NODE_ENV=test in .env is documented as ignored by the test hooks');
+    pass('NODE_ENV=test in .env is documented as ignored by the test hooks, and dotenv preload is refused');
   }
 }
 
