@@ -277,12 +277,13 @@ function probeSetterExportWithPreload(nodeEnv, dotenvBody, options) {
     }
     const dotenvConfigPath = require.resolve('dotenv/config');
     const script = [
+      '// Capture NODE_ENV and sentinel BEFORE require(server), so we see preload state before server dotenv.config',
+      'const preNodeEnv = Object.prototype.hasOwnProperty.call(process.env, "NODE_ENV") ? process.env.NODE_ENV : null;',
+      'const preSentinel = process.env.DOTENV_PRELOAD_SENTINEL || null;',
       'const server = require(' + JSON.stringify(path.join(__dirname, '..', 'src', 'server.js')) + ');',
       'const names = ["setTwilioClientForTests", "setGrokRealtimeUrlForTests"];',
       'const leaked = names.filter((name) => typeof server[name] !== "undefined");',
-      'const nodeEnv = Object.prototype.hasOwnProperty.call(process.env, "NODE_ENV") ? process.env.NODE_ENV : null;',
-      'const sentinel = process.env.DOTENV_PRELOAD_SENTINEL || null;',
-      'process.stdout.write(JSON.stringify({ leaked: leaked, nodeEnv: nodeEnv, sentinel: sentinel }));',
+      'process.stdout.write(JSON.stringify({ leaked: leaked, preNodeEnv: preNodeEnv, preSentinel: preSentinel }));',
       'process.exit(leaked.length ? 1 : 0);',
     ].join('\n');
     let execArgv = [];
@@ -292,10 +293,16 @@ function probeSetterExportWithPreload(nodeEnv, dotenvBody, options) {
       execArgv = ['--import', dotenvConfigPath];
     } else if (opts.preloadType === 'env-file-execArgv') {
       execArgv = ['--env-file', path.join(tmp, '.env')];
+    } else if (opts.preloadType === 'env-file-if-exists-separate') {
+      execArgv = ['--env-file-if-exists', path.join(tmp, '.env')];
+    } else if (opts.preloadType === 'env-file-if-exists-equals') {
+      execArgv = [`--env-file-if-exists=${path.join(tmp, '.env')}`];
     } else if (opts.preloadType === 'require-nodeOptions') {
       env.NODE_OPTIONS = `--require ${dotenvConfigPath}`;
     } else if (opts.preloadType === 'import-nodeOptions') {
       env.NODE_OPTIONS = `--import ${dotenvConfigPath}`;
+    } else if (opts.preloadType === 'none') {
+      // No preload flags - control case
     }
     return spawnSync(process.execPath, [...execArgv, '-e', script], {
       cwd: tmp,
@@ -350,13 +357,37 @@ function assertPreloadRefusesTestSetters() {
       pass('dotenv preload positive case: shell NODE_ENV=test exports setters');
     }
   }
+  
+  // Control case: no preload flag, .env with NODE_ENV=test, confirm pre-require values are absent
+  const controlResult = probeSetterExportWithPreload(undefined, dotenvTest, { preloadType: 'none' });
+  if (controlResult.error) {
+    failures.push(`control case (no preload): ${controlResult.error.message}`);
+  } else {
+    let controlReport = null;
+    try {
+      controlReport = JSON.parse(controlResult.stdout || '');
+    } catch {
+      controlReport = null;
+    }
+    if (!controlReport || !Array.isArray(controlReport.leaked)) {
+      failures.push('control case (no preload): child exited without a setter report');
+    } else if (controlReport.preNodeEnv !== null || controlReport.preSentinel !== null) {
+      failures.push(`control case (no preload): pre-require values should be absent (preNodeEnv=${controlReport.preNodeEnv}, preSentinel=${controlReport.preSentinel})`);
+    } else if (controlReport.leaked.length !== 0) {
+      failures.push(`control case (no preload): setters still exported (${controlReport.leaked.join(', ')})`);
+    } else {
+      pass('control case (no preload): pre-require values absent, setters omitted');
+    }
+  }
 
   // Test each preload variant
-  // Note: --env-file only works via execArgv, not NODE_OPTIONS (Node.js restriction)
+  // Note: --env-file* only works via execArgv, not NODE_OPTIONS (Node.js restriction)
   const variants = [
     { preloadType: 'require-execArgv', label: 'execArgv -r dotenv/config' },
     { preloadType: 'import-execArgv', label: 'execArgv --import dotenv/config' },
     { preloadType: 'env-file-execArgv', label: 'execArgv --env-file .env' },
+    { preloadType: 'env-file-if-exists-separate', label: 'execArgv --env-file-if-exists .env (separate)' },
+    { preloadType: 'env-file-if-exists-equals', label: 'execArgv --env-file-if-exists=.env' },
     { preloadType: 'require-nodeOptions', label: 'NODE_OPTIONS --require dotenv/config' },
     { preloadType: 'import-nodeOptions', label: 'NODE_OPTIONS --import dotenv/config' },
   ];
@@ -378,10 +409,10 @@ function assertPreloadRefusesTestSetters() {
       continue;
     }
     
-    // Positively assert the preload took effect
-    const preloadTookEffect = report.nodeEnv === 'test' || report.sentinel === 'loaded';
+    // Positively assert the preload took effect (check pre-require values)
+    const preloadTookEffect = report.preNodeEnv === 'test' || report.preSentinel === 'loaded';
     if (!preloadTookEffect) {
-      failures.push(`${variant.label}: preload did not take effect (nodeEnv=${report.nodeEnv}, sentinel=${report.sentinel})`);
+      failures.push(`${variant.label}: preload did not take effect (preNodeEnv=${report.preNodeEnv}, preSentinel=${report.preSentinel})`);
       continue;
     }
     

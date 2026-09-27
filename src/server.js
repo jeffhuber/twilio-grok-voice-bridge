@@ -2523,8 +2523,8 @@ module.exports = {
 // (relative or absolute path) or --env-file in process.execArgv or NODE_OPTIONS.
 function isDotenvPreloaded() {
   function checkArg(arg) {
-    // --env-file, --env-file=path, --env-file-if-exists
-    if (arg === '--env-file' || arg.startsWith('--env-file=') || arg === '--env-file-if-exists') {
+    // --env-file* covers all forms: --env-file, --env-file=path, --env-file-if-exists, etc.
+    if (arg.startsWith('--env-file')) {
       return true;
     }
     // -r, --require, --import with dotenv/config (relative or absolute path)
@@ -2537,7 +2537,8 @@ function isDotenvPreloaded() {
     for (let i = 0; i < process.execArgv.length; i++) {
       const arg = process.execArgv[i];
       if (checkArg(arg)) return true;
-      // Check next arg for -r, --require, --import
+      // Early-exit optimization: check the next arg when this one is -r/--require/--import.
+      // Redundant (the loop will check it anyway), but avoids advancing when we know to refuse.
       if (arg === '-r' || arg === '--require' || arg === '--import') {
         const next = process.execArgv[i + 1];
         if (next && checkArg(next)) return true;
@@ -2551,6 +2552,7 @@ function isDotenvPreloaded() {
     for (let i = 0; i < tokens.length; i++) {
       const token = tokens[i];
       if (checkArg(token)) return true;
+      // Early-exit optimization: same as above for NODE_OPTIONS tokens
       if (token === '-r' || token === '--require' || token === '--import') {
         const next = tokens[i + 1];
         if (next && checkArg(next)) return true;

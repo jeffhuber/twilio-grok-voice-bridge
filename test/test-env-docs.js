@@ -372,17 +372,17 @@ if (
 
 if (
   !readme.includes('Never set `NODE_ENV=test` in `.env`') ||
-  !readme.includes('The test hooks ignore `.env`') ||
+  !readme.includes('can\'t be told apart') ||
   !readme.toLowerCase().includes('preload') ||
   !readme.toLowerCase().includes('refuse') ||
-  !readme.includes('--env-file') ||
-  !readme.includes('--import') ||
+  !readme.includes('--env-file*') ||
+  !readme.includes('dotenv\'s own `config`') ||
   !example.includes('Never set NODE_ENV=test in .env') ||
-  !example.includes('The test hooks ignore .env') ||
+  !example.includes('can\'t be told apart') ||
   !example.toLowerCase().includes('preload') ||
   !example.toLowerCase().includes('refuse')
 ) {
-  fail('docs do not say to keep NODE_ENV=test out of .env, that the test hooks ignore .env, or that dotenv/env-file preload is refused');
+  fail('docs do not say to keep NODE_ENV=test out of .env, that other preload forms can\'t be told apart, or that dotenv config and --env-file* are detected');
 } else if (!code.includes('const nodeEnvFromShell = process.env.NODE_ENV;')) {
   fail('src/server.js does not capture NODE_ENV before dotenv');
 } else if (!code.includes('isDotenvPreloaded') || !code.includes('!isDotenvPreloaded()')) {
