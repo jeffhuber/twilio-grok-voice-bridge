@@ -171,8 +171,29 @@ if (
   !example.includes('leading zeros is not exempt')
 ) {
   fail('env docs do not say the IP/date exemption is per token, or that leading-zero IPv4 is not exempt');
+} else if (!readme.includes('123.45.67.89') || !readme.includes('kept unmasked as IPv4')) {
+  fail('README does not say dotted quads that parse as IPv4 are kept unmasked');
 } else {
-  pass('IP and date exemption is documented per token, including leading-zero IPv4');
+  pass('IP and date exemption is documented per token, including leading-zero IPv4 and dotted quads that parse as IPv4');
+}
+
+if (
+  !readme.includes('Never set `NODE_ENV=test` in `.env`') ||
+  !readme.includes('The test hooks ignore `.env`') ||
+  !example.includes('Never set NODE_ENV=test in .env') ||
+  !example.includes('The test hooks ignore .env')
+) {
+  fail('docs do not say to keep NODE_ENV=test out of .env, or that the test hooks ignore .env');
+} else if (!code.includes('const nodeEnvFromShell = process.env.NODE_ENV;') || !code.includes('if (nodeEnvFromShell === \'test\')')) {
+  fail('src/server.js does not capture NODE_ENV before dotenv and gate the test setters on it');
+} else {
+  const captureAt = code.indexOf('const nodeEnvFromShell = process.env.NODE_ENV;');
+  const configAt = code.indexOf('.config({ override: true })');
+  if (captureAt === -1 || configAt === -1 || captureAt > configAt) {
+    fail('NODE_ENV is not captured before dotenv.config');
+  } else {
+    pass('NODE_ENV=test in .env is documented as ignored by the test hooks');
+  }
 }
 
 if (!readme.includes('not minted or verified') || !readme.includes('even if `MEDIA_STREAM_SECRET` is set')) {

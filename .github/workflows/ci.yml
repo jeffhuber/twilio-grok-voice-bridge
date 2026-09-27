@@ -142,7 +142,6 @@ jobs:
       - name: Run call-error mask test
         env:
           BRIDGE_API_KEY: ci-test-key-not-a-secret
-          NODE_ENV: test
         run: node test/test-mask-call-errors.js
 
       - name: Security audit (advisory only)

@@ -79,7 +79,7 @@ Body: `{ "callSid": "...", "voice": "ara" }` — mid-call TTS voice switch.
 
 ### GET /health
 
-Liveness + config summary (no secrets). `mediaAuthDedicated` stays in this body because the media-secret test reads it to tell a dedicated `MEDIA_STREAM_SECRET` from the `BRIDGE_API_KEY` fallback, and the value is only a boolean. It is true only when `BRIDGE_API_KEY` is set and `MEDIA_STREAM_SECRET` is non-empty after trim. Neither secret is included.
+Liveness + config summary (no secrets). `mediaAuthDedicated` stays in this body so an operator can confirm a dedicated `MEDIA_STREAM_SECRET` is configured rather than the operator-key fallback, without revealing either secret. The value is only a boolean. It is true only when `BRIDGE_API_KEY` is set and `MEDIA_STREAM_SECRET` is non-empty after trim. Neither secret is included.
 
 ## Security
 
@@ -173,7 +173,7 @@ For public hosts, **always** use one of:
 
 ## Environment table
 
-Values are read from the process environment. `src/server.js` calls `require('dotenv').config({ override: true })`, so values in `.env` replace existing environment variables. `ALLOW_UNAUTHENTICATED_OPERATOR`, `ENABLE_RECORDING`, `SKIP_AI_DISCLOSURE`, and `LOG_TRANSCRIPTS` are on only when the value is exactly `1`. `true`, `yes`, and `0` do not turn them on. `DISABLE_OPENER_ON_CONNECT` disables the connect greeting only when the value is exactly `1`. Unset, `0`, and `false` leave the greeting on.
+Values are read from the process environment. `src/server.js` calls `require('dotenv').config({ override: true })`, so values in `.env` replace existing environment variables. Never set `NODE_ENV=test` in `.env`. The test hooks ignore `.env` and use the shell `NODE_ENV` captured before dotenv loads. `ALLOW_UNAUTHENTICATED_OPERATOR`, `ENABLE_RECORDING`, `SKIP_AI_DISCLOSURE`, and `LOG_TRANSCRIPTS` are on only when the value is exactly `1`. `true`, `yes`, and `0` do not turn them on. `DISABLE_OPENER_ON_CONNECT` disables the connect greeting only when the value is exactly `1`. Unset, `0`, and `false` leave the greeting on.
 
 Numeric settings use `Number(process.env.NAME || default)`. The environment value is a string, so `"0"` is kept and becomes numeric 0; it is not replaced by the default. An empty or unset value uses the default. `Number(value) || default` would drop numeric 0; these settings do not use that form.
 
@@ -194,7 +194,7 @@ Media-stream HMAC uses `MEDIA_STREAM_SECRET` when that value is non-empty after 
 | `XAI_VOICE_MODEL` | Realtime model query parameter | `grok-voice-latest` |
 | `VOICE_ALIASES` | JSON object merged over built-in aliases (`ara`, `eve`, `rex`, `sal`) | unset |
 | `PORT` | HTTP listen port | `3000` |
-| `NODE_ENV` | Exactly `test` exports `setTwilioClientForTests` and `setGrokRealtimeUrlForTests`. Any other value, including unset, omits them from the module export. Leave unset for a normal run | unset |
+| `NODE_ENV` | Exactly `test` in the shell, captured before dotenv, exports `setTwilioClientForTests` and `setGrokRealtimeUrlForTests`. Any other value, including unset, omits them from the module export. Never set `NODE_ENV=test` in `.env`. The test hooks ignore `.env`. Leave unset for a normal run | unset |
 | `PUBLIC_HOST` | Public hostname only (no scheme). Wrong value causes 403s when a Twilio token is set | unset |
 | `BRIDGE_API_KEY` | Operator secret (Bearer or `X-Bridge-Key`). Required for media HMAC. When `MEDIA_STREAM_SECRET` is empty, this value is the HMAC key | unset; process exits unless the override below is exactly `1` |
 | `MEDIA_STREAM_SECRET` | Dedicated media HMAC key only when `BRIDGE_API_KEY` is also set. When non-empty after trim, signatures use this instead of `BRIDGE_API_KEY`. If `BRIDGE_API_KEY` is unset, signatures are not minted or verified | unset |
@@ -205,7 +205,7 @@ Media-stream HMAC uses `MEDIA_STREAM_SECRET` when that value is non-empty after 
 | `DISABLE_OPENER_ON_CONNECT` | Exactly `1` disables the greeting sent when the stream connects. Any other value, including unset, `0`, and `false`, leaves the greeting on. Per-call `openerOnConnect: true` still greets | off (greeting on) |
 | `ENABLE_RECORDING` | Exactly `1` passes `record: true` and dual-channel recording to Twilio | off |
 | `SKIP_AI_DISCLOSURE` | Exactly `1` omits the AI disclosure block from instructions | off (disclosure on) |
-| `LOG_TRANSCRIPTS` | Exactly `1` writes transcript lines to stdout. The placed-call log masks the destination. `[call] error:`, `[hangup] Twilio update failed:`, `[twiml-connect] Error:`, `[http] unexpected error:`, `[http] 400 body parse error:`, and `[grok] error` log `err.message` after digit runs of 7 or more in that text are masked. The same mask covers `[grok] server error`, `[grok] JSON parse error`, `[twilio] JSON parse error`, and `[twilio] ws error`. An IPv4 address or calendar date is exempt per whitespace-delimited token. An IPv4 address with leading zeros is not exempt | off |
+| `LOG_TRANSCRIPTS` | Exactly `1` writes transcript lines to stdout. The placed-call log masks the destination. `[call] error:`, `[hangup] Twilio update failed:`, `[twiml-connect] Error:`, `[http] unexpected error:`, `[http] 400 body parse error:`, and `[grok] error` log `err.message` after digit runs of 7 or more in that text are masked. The same mask covers `[grok] server error`, `[grok] JSON parse error`, `[twilio] JSON parse error`, and `[twilio] ws error`. An IPv4 address or calendar date is exempt per whitespace-delimited token. An IPv4 address with leading zeros is not exempt. Dotted quads that parse as IPv4 (for example 123.45.67.89) are kept unmasked as IPv4 | off |
 | `CONTACT_FULL_NAME` | Optional name for restaurant-book instructions | unset |
 | `CONTACT_MOBILE` | Optional callback number for restaurant-book instructions | unset |
 | `VAD_THRESHOLD` | Server VAD threshold | `0.7` |
@@ -247,7 +247,7 @@ Optional softContinue true on POST /call enables post-playback soft-continue.
 - **X-Twilio-Signature validation**: Runs on `/twiml-connect` only when `TWILIO_AUTH_TOKEN` is non-empty. The checked URL uses `PUBLIC_HOST`; a different host than the one Twilio signed returns 403.
 - **Recording** is on only when `ENABLE_RECORDING` is exactly `1`.
 - **AI disclosure** stays on unless `SKIP_AI_DISCLOSURE` is exactly `1`.
-- **Privacy defaults:** The placed-call log masks the destination. `[call] error:`, `[hangup] Twilio update failed:`, `[twiml-connect] Error:`, `[http] unexpected error:`, `[http] 400 body parse error:`, and `[grok] error` log `err.message` after digit runs of 7 or more in that text are masked. The same mask covers `[grok] server error`, `[grok] JSON parse error`, `[twilio] JSON parse error`, and `[twilio] ws error`. The HTTP 500 body from `POST /call` uses it too. Spaces, hyphens, parentheses, and periods inside the run count. A letter or digit on either side is left alone, so Call SIDs and short error codes stay intact. A whole IPv4 address and a whole calendar date are left alone. That exemption is checked per whitespace-delimited token. An IPv4 address with leading zeros is not exempt. There is no epoch-millisecond exemption, so a 13-digit run is masked, including a run that starts with + and the country code. Transcript lines are written to stdout only when `LOG_TRANSCRIPTS` is exactly `1`.
+- **Privacy defaults:** The placed-call log masks the destination. `[call] error:`, `[hangup] Twilio update failed:`, `[twiml-connect] Error:`, `[http] unexpected error:`, `[http] 400 body parse error:`, and `[grok] error` log `err.message` after digit runs of 7 or more in that text are masked. The same mask covers `[grok] server error`, `[grok] JSON parse error`, `[twilio] JSON parse error`, and `[twilio] ws error`. The HTTP 500 body from `POST /call` uses it too. Spaces, hyphens, parentheses, and periods inside the run count. A letter or digit on either side is left alone, so Call SIDs and short error codes stay intact. A whole IPv4 address and a whole calendar date are left alone. That exemption is checked per whitespace-delimited token. An IPv4 address with leading zeros is not exempt. Dotted quads that parse as IPv4 (for example 123.45.67.89) are kept unmasked as IPv4. There is no epoch-millisecond exemption, so a 13-digit run is masked, including a run that starts with + and the country code. Transcript lines are written to stdout only when `LOG_TRANSCRIPTS` is exactly `1`.
 - Keep Twilio tokens, xAI keys, BRIDGE_API_KEY, and real phone numbers out of git.
 - Twilio needs a public WSS URL for Media Streams.
 
