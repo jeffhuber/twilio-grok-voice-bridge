@@ -164,6 +164,17 @@ if (!readme.includes('NEVER_CONNECTED_TIMEOUT_MS') || !example.includes('NEVER_C
   pass('never-connected sessions are documented');
 }
 
+if (
+  !readme.includes('per whitespace-delimited token') ||
+  !readme.includes('leading zeros is not exempt') ||
+  !example.includes('per whitespace-delimited token') ||
+  !example.includes('leading zeros is not exempt')
+) {
+  fail('env docs do not say the IP/date exemption is per token, or that leading-zero IPv4 is not exempt');
+} else {
+  pass('IP and date exemption is documented per token, including leading-zero IPv4');
+}
+
 if (!readme.includes('not minted or verified') || !readme.includes('even if `MEDIA_STREAM_SECRET` is set')) {
   fail('README does not refuse media HMAC when BRIDGE_API_KEY is unset');
 } else if (!example.includes('not minted or verified')) {

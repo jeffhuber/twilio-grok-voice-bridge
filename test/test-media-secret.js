@@ -5,6 +5,7 @@ process.env.BRIDGE_API_KEY = 'operator-test-key';
 delete process.env.MEDIA_STREAM_SECRET;
 
 const crypto = require('crypto');
+const fs = require('fs');
 const http = require('http');
 const path = require('path');
 const { spawnSync } = require('child_process');
@@ -347,6 +348,17 @@ async function main() {
     pass('blank MEDIA_STREAM_SECRET does not warn as a short key');
   } else {
     fail('blank MEDIA_STREAM_SECRET warned or the operator key was printed');
+  }
+
+  const readme = fs.readFileSync(path.join(__dirname, '..', 'README.md'), 'utf8');
+  if (
+    readme.includes('`mediaAuthDedicated` stays') &&
+    readme.includes('dedicated `MEDIA_STREAM_SECRET`') &&
+    readme.includes('only a boolean')
+  ) {
+    pass('README explains why /health keeps mediaAuthDedicated');
+  } else {
+    fail('README does not explain why /health keeps mediaAuthDedicated');
   }
 
   if (failed > 0) {
