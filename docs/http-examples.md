@@ -56,11 +56,11 @@ Private styles are JSON files in `STYLE_PACKS_DIR`, not fields on `/call`. `temp
   "coaching": ["Keep turns short.", "Do not invent personal details."],
   "closing": "Thank them and say goodbye.",
   "softContinue": false,
-  "softContinuePrompt": "[bridge-continue] Offer one short warm sentence, or finish the call."
+  "softContinuePrompt": "[bridge-continue] Offer one short warm sentence, or finish the call and include [[HANGUP_REQUESTED]]."
 }
 ```
 
-`name` must match `^[a-z0-9][a-z0-9-]{0,39}$`. `role` is required. `coaching` and `closing` are a string or an array of strings. Unknown keys are ignored. A closing that does not contain `[[HANGUP_REQUESTED]]` gets the generic hangup-token lines appended. Pack contents are never written to logs.
+`name` must match `^[a-z0-9][a-z0-9-]{0,39}$`. `role` is required. `coaching` and `closing` are a string or an array of strings. Unknown keys are ignored. A closing or `softContinuePrompt` that does not contain `[[HANGUP_REQUESTED]]` gets the generic hangup-token lines appended. Pack contents are never written to logs. Unauthenticated `GET /health` does not list pack names or aliases. It reports `stylePackCount`. A symlink in `STYLE_PACKS_DIR` is loaded only when it points at a regular file.
 
 
 ## POST /steer

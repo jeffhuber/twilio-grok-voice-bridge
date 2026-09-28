@@ -513,6 +513,29 @@ function stylePackFileLabel(fileName) {
   return maskPhoneNumbersInText(fileName);
 }
 
+/**
+ * Top-level *.json entries. A symlink is loaded only when statSync, which
+ * follows the link, reports a regular file. Directory links are not walked.
+ */
+function stylePackEntryIsLoadable(dir, entry) {
+  if (!entry.name.endsWith('.json')) return false;
+  if (entry.isFile()) return true;
+  if (!entry.isSymbolicLink()) return false;
+  const label = stylePackFileLabel(entry.name);
+  let st;
+  try {
+    st = fs.statSync(path.join(dir, entry.name));
+  } catch (err) {
+    console.warn(`[warn] style pack skipped file=${label} reason=unreadable`);
+    return false;
+  }
+  if (!st.isFile()) {
+    console.warn(`[warn] style pack skipped file=${label} reason=not a regular file`);
+    return false;
+  }
+  return true;
+}
+
 function readStylePackFile(dir, fileName) {
   const label = stylePackFileLabel(fileName);
   let raw;
@@ -560,7 +583,7 @@ function loadStylePacks(dirRaw) {
   try {
     names = fs
       .readdirSync(dir, { withFileTypes: true })
-      .filter((entry) => entry.isFile() && entry.name.endsWith('.json'))
+      .filter((entry) => stylePackEntryIsLoadable(dir, entry))
       .map((entry) => entry.name)
       .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
   } catch (err) {
@@ -576,7 +599,8 @@ function loadStylePacks(dirRaw) {
 
 /**
  * Map whitespace-stripped E.164 numbers to a known style.
- * Invalid JSON is ignored. Unknown styles are dropped. Numbers are masked in warnings.
+ * Invalid JSON is ignored. Keys that are not E.164, and unknown styles, are dropped.
+ * Numbers are masked in warnings.
  */
 function loadStyleAutoSelect(raw) {
   styleAutoSelect.clear();
@@ -596,6 +620,12 @@ function loadStyleAutoSelect(raw) {
     const key = String(rawKey).replace(/\s+/g, '');
     if (!key) {
       console.warn('[warn] STYLE_AUTO_SELECT dropped an empty number');
+      continue;
+    }
+    if (!isE164(key)) {
+      console.warn(
+        `[warn] STYLE_AUTO_SELECT dropped ${maskPhoneNumber(key)}: key must be E.164`
+      );
       continue;
     }
     const value = parsed[rawKey];
@@ -1020,11 +1050,21 @@ function supportRoleLine() {
   return `You are placing a phone call on behalf of ${fullName} to handle an errand or customer-support matter.`;
 }
 
+function withHangupTokenLines(text) {
+  if (text.includes('[[HANGUP_REQUESTED]]')) return text;
+  return `${text}\n${GENERIC_HANGUP_TOKEN_LINES}`;
+}
+
 function packClosingText(pack) {
   const text = packText(pack.closing);
   const closing = text.trim() ? text : GENERIC_CLOSING_LINES.join('\n');
-  if (closing.includes('[[HANGUP_REQUESTED]]')) return closing;
-  return `${closing}\n${GENERIC_HANGUP_TOKEN_LINES}`;
+  return withHangupTokenLines(closing);
+}
+
+function packSoftContinuePromptText(pack) {
+  const text = pack && typeof pack.softContinuePrompt === 'string' ? pack.softContinuePrompt : '';
+  if (!text.trim()) return '';
+  return withHangupTokenLines(text);
 }
 
 function buildPackInstructions(pack, goal, context, discloseAi) {
@@ -1139,8 +1179,7 @@ function createSession({ callSid, goal, context, voice, style, to, softContinue,
   const pack = stylePacksByName.get(resolvedStyle) || null;
   const soft = resolveSoftContinue(softContinue, resolvedStyle);
   const discloseOverride = typeof discloseAi === 'boolean' ? discloseAi : undefined;
-  const rawPrompt = pack && typeof pack.softContinuePrompt === 'string' ? pack.softContinuePrompt : '';
-  const prompt = rawPrompt.trim() ? rawPrompt : '';
+  const prompt = packSoftContinuePromptText(pack);
   /** @type {CallSession} */
   const session = {
     callSid,
@@ -2073,7 +2112,9 @@ app.get('/health', (_req, res) => {
     bargeIn: true,
     softContinueMs: SOFT_CONTINUE_MS,
     voiceSwitch: true,
-    styles: Object.keys(STYLE_PROFILES),
+    // Built-in names only. Pack names and aliases stay off this unauthenticated route.
+    styles: ['support', 'restaurant-book', 'custom'],
+    stylePackCount: stylePacksByName.size,
     styleAutoSelectCount: styleAutoSelect.size,
     aiDisclosureDefault: !skipAiDisclosure(),
     contactConfigured: Boolean(getContact().fullName || getContact().mobile),

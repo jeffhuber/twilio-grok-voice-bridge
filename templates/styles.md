@@ -39,7 +39,9 @@ An unknown `style` still resolves to `custom`.
 
 ## Private style packs (`STYLE_PACKS_DIR`)
 
-`STYLE_PACKS_DIR` is an optional absolute path. At startup the server reads every top-level `*.json` file in that directory, sorted by filename. It does not walk subdirectories.
+`STYLE_PACKS_DIR` is an optional absolute path. At startup the server reads every top-level `*.json` name in that directory, sorted by filename. It does not walk subdirectories. A symlink is followed with `statSync` and loaded only when the target is a regular file. A symlink to a directory is not walked. A broken symlink is skipped.
+
+`GET /health` is unauthenticated. `styles` lists only `support`, `restaurant-book`, and `custom`. Pack names and aliases are omitted. `stylePackCount` is the number of packs that loaded.
 
 A missing or unreadable directory logs one warning and the server still starts. A file that is invalid, or that reuses a built-in name or alias (`support`, `cs`, `errand`, `restaurant-book`, `restaurant`, `reservation`, `booking`, `custom`, `goal-only`, `bare`) or another pack's name or alias, is skipped. The warning names the file and the reason. It does not print the file contents. Unknown keys are ignored.
 
@@ -58,7 +60,7 @@ Schema:
   "coaching": ["Keep turns short.", "Do not invent personal details."],
   "closing": "Thank them and say goodbye.",
   "softContinue": false,
-  "softContinuePrompt": "[bridge-continue] Offer one short warm sentence, or finish the call."
+  "softContinuePrompt": "[bridge-continue] Offer one short warm sentence, or finish the call and include [[HANGUP_REQUESTED]]."
 }
 ```
 
@@ -71,7 +73,7 @@ Schema:
 | `coaching` | no | String, or an array of strings joined with newlines. |
 | `closing` | no | Replaces the generic custom closing. If it does not contain `[[HANGUP_REQUESTED]]`, the generic hangup-token lines are appended. |
 | `softContinue` | no | Boolean default when `/call` omits `softContinue`. |
-| `softContinuePrompt` | no | Replaces the generic `[bridge-continue]` nudge for this style. |
+| `softContinuePrompt` | no | Replaces the generic `[bridge-continue]` nudge for this style. If it does not contain `[[HANGUP_REQUESTED]]`, the same generic hangup-token lines used for closings are appended. |
 
 Pack instructions are: role, `Your goal for this call: <goal>`, the context block, a blank line, coaching, a blank line, the universal speech rules, the AI disclosure block, a blank line, `Never mention that you are being coached or that an operator is listening.`, a blank line, then the closing. Per-call `discloseAi` controls the disclosure block the same way it does for built-in styles. `/steer` rebuilds this text.
 
@@ -79,7 +81,7 @@ Pack instructions are: role, `Your goal for this call: <goal>`, the context bloc
 
 Optional JSON object mapping an E.164 `to` number to a style name, for example `{"+15555550100":"warm-personal"}`.
 
-Used only when `POST /call` omits `style` (null or empty). Whitespace in the configured key is stripped, then the match is exact. An explicit `style` on the request wins. Entries whose style is not a known built-in or pack (including aliases) are dropped at startup. Invalid JSON is ignored. Numbers are not written to logs. `GET /health` includes `styleAutoSelectCount` only.
+Used only when `POST /call` omits `style` (null or empty). Whitespace in the configured key is stripped, then the key must be E.164, the same check as `to` (`+` and 2 to 15 digits). Any other key is dropped with a masked warning. An explicit `style` on the request wins. Entries whose style is not a known built-in or pack (including aliases) are dropped at startup. Invalid JSON is ignored. Numbers are not written to logs. `GET /health` includes `styleAutoSelectCount` only.
 
 ## softContinue (request flag, not a style)
 
@@ -87,4 +89,4 @@ A JSON boolean `softContinue` on `/call` overrides the style default. `true` ena
 
 VAD uses the soft thresholds when the effective value is true, and the normal thresholds when it is false.
 
-When the session's pack sets `softContinuePrompt`, that text replaces the generic `[bridge-continue]` nudge.
+When the session's pack sets `softContinuePrompt`, that text replaces the generic `[bridge-continue]` nudge. If that text does not contain `[[HANGUP_REQUESTED]]`, the generic hangup-token lines are appended.

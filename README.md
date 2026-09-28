@@ -81,7 +81,7 @@ Body: `{ "callSid": "...", "voice": "ara" }` — mid-call TTS voice switch.
 
 ### GET /health
 
-Liveness + config summary (no secrets). `mediaAuthDedicated` stays in this body so an operator can confirm a dedicated `MEDIA_STREAM_SECRET` is configured rather than the operator-key fallback, without revealing either secret. The value is only a boolean. It is true only when `BRIDGE_API_KEY` is set and `MEDIA_STREAM_SECRET` is non-empty after trim. Neither secret is included. `aiDisclosureDefault` is true unless `SKIP_AI_DISCLOSURE` is exactly `1`. `styleAutoSelectCount` is the number of kept destination-to-style entries. The numbers themselves are not included. `styles` lists built-in names plus loaded pack names (not aliases).
+Liveness + config summary (no secrets). `mediaAuthDedicated` stays in this body so an operator can confirm a dedicated `MEDIA_STREAM_SECRET` is configured rather than the operator-key fallback, without revealing either secret. The value is only a boolean. It is true only when `BRIDGE_API_KEY` is set and `MEDIA_STREAM_SECRET` is non-empty after trim. Neither secret is included. `aiDisclosureDefault` is true unless `SKIP_AI_DISCLOSURE` is exactly `1`. `styleAutoSelectCount` is the number of kept destination-to-style entries. The numbers themselves are not included. `styles` lists only the built-in names `support`, `restaurant-book`, and `custom`. Private pack names and aliases are not included. `stylePackCount` is the number of loaded packs.
 
 ## Security
 
@@ -210,8 +210,8 @@ Media-stream HMAC uses `MEDIA_STREAM_SECRET` when that value is non-empty after 
 | `LOG_TRANSCRIPTS` | Exactly `1` writes transcript lines to stdout. The placed-call log masks the destination. `[call] error:`, `[hangup] Twilio update failed:`, `[twiml-connect] Error:`, `[http] unexpected error:`, `[http] 400 body parse error:`, and `[grok] error` log `err.message` after digit runs of 7 or more in that text are masked. The same mask covers `[grok] server error`, `[grok] JSON parse error`, `[twilio] JSON parse error`, and `[twilio] ws error`. An IPv4 address or calendar date is exempt per whitespace-delimited token. An IPv4 address with leading zeros is not exempt. Dotted quads that parse as IPv4 (for example 123.45.67.89) are kept unmasked as IPv4 | off |
 | `CONTACT_FULL_NAME` | Optional name. When set, the support style's first line says the call is on behalf of this name. restaurant-book uses it for the reservation | unset |
 | `CONTACT_MOBILE` | Optional callback number for restaurant-book instructions | unset |
-| `STYLE_PACKS_DIR` | Absolute path to a directory of private style-pack JSON files. Every top-level `*.json` file is loaded at startup, sorted by filename, not recursive. A missing or unreadable directory warns once and the server still starts. Invalid or conflicting files are skipped. Pack text is not logged | unset |
-| `STYLE_AUTO_SELECT` | JSON object mapping an E.164 `to` number to a style name. Applied only when `POST /call` omits `style`. Whitespace in the key is stripped, then the match is exact. Invalid JSON is ignored. Entries whose style is unknown are dropped. Numbers are not logged. `/health` reports `styleAutoSelectCount` only | unset |
+| `STYLE_PACKS_DIR` | Absolute path to a directory of private style-pack JSON files. Every top-level `*.json` name is loaded at startup, sorted by filename, not recursive. A symlink is loaded only when `statSync` follows it to a regular file. A symlink to a directory is not walked. A missing or unreadable directory warns once and the server still starts. Invalid or conflicting files are skipped. Pack text is not logged. `/health` reports `stylePackCount` and does not list pack names | unset |
+| `STYLE_AUTO_SELECT` | JSON object mapping an E.164 `to` number to a style name. Applied only when `POST /call` omits `style`. Whitespace in the key is stripped, then the key must pass the same E.164 check as `to` (`+` and 2 to 15 digits). Other keys are dropped with a masked warning. Invalid JSON is ignored. Entries whose style is unknown are dropped. Numbers are not logged. `/health` reports `styleAutoSelectCount` only | unset |
 | `VAD_THRESHOLD` | Server VAD threshold | `0.7` |
 | `VAD_SILENCE_MS` | Server VAD silence duration | `800` |
 | `VAD_PREFIX_MS` | Server VAD prefix padding | `300` |
@@ -241,7 +241,7 @@ When `CONTACT_FULL_NAME` is set, the support style's first line is: `You are pla
 
 ### Private style packs
 
-Set `STYLE_PACKS_DIR` to an absolute directory. At startup the server loads each top-level `*.json` file, sorted by filename. Subdirectories are ignored. This is how an operator adds a call style without editing `src/server.js`.
+Set `STYLE_PACKS_DIR` to an absolute directory. At startup the server loads each top-level `*.json` name, sorted by filename. Subdirectories are ignored. A symlink is followed with `statSync` and loaded only when the target is a regular file. A symlink to a directory is not walked, and a broken symlink is skipped. This is how an operator adds a call style without editing `src/server.js`. `GET /health` is unauthenticated, so it lists only the built-in style names and `stylePackCount`. It does not include pack names or aliases.
 
 `templates/style-packs/example-warm-personal.json` is an example only. It is not loaded unless that directory is `STYLE_PACKS_DIR`. Do not put real names, phone numbers, or private coaching in the repo.
 
@@ -256,26 +256,26 @@ Each file is one pack. Unknown keys are ignored.
   "coaching": "Keep turns short.",
   "closing": ["Thank them and say goodbye."],
   "softContinue": false,
-  "softContinuePrompt": "[bridge-continue] Offer one short warm sentence, or finish the call."
+  "softContinuePrompt": "[bridge-continue] Offer one short warm sentence, or finish the call and include [[HANGUP_REQUESTED]]."
 }
 ```
 
 | Field | Required | Meaning |
 | --- | --- | --- |
-| `name` | yes | Must match `^[a-z0-9][a-z0-9-]{0,39}$`. Added to `STYLE_PROFILES` and `GET /health` `styles`. |
+| `name` | yes | Must match `^[a-z0-9][a-z0-9-]{0,39}$`. This is the style id. It is not listed on unauthenticated `GET /health`. |
 | `description` | no | Becomes the `STYLE_PROFILES` value. |
 | `aliases` | no | Extra names. Trimmed, lowercased, spaces become hyphens, then the same name pattern. `normalizeStyle()` resolves them to this pack. |
 | `role` | yes | Non-empty string. First lines of the instructions. |
 | `coaching` | no | String, or an array of strings joined with newlines. |
 | `closing` | no | String or array of strings. Replaces the generic custom-style closing. If the text does not contain `[[HANGUP_REQUESTED]]`, the generic hangup-token lines are appended. |
 | `softContinue` | no | Boolean default used when `/call` omits `softContinue`. |
-| `softContinuePrompt` | no | Replaces the generic `[bridge-continue]` nudge for sessions in this style. |
+| `softContinuePrompt` | no | Replaces the generic `[bridge-continue]` nudge for sessions in this style. If the text does not contain `[[HANGUP_REQUESTED]]`, the same generic hangup-token lines used for closings are appended. |
 
 A pack may not reuse a built-in name or alias (`support`, `cs`, `errand`, `restaurant-book`, `restaurant`, `reservation`, `booking`, `custom`, `goal-only`, `bare`) or another pack's name or alias. Conflicting or invalid files are skipped. The warning names the file and the reason and does not print the file contents. A missing or unreadable directory warns once. The server still starts.
 
 Instructions for a pack are: role, `Your goal for this call: <goal>`, the context block, a blank line, coaching, a blank line, the universal speech rules, the AI disclosure block (including a per-call `discloseAi` override), a blank line, `Never mention that you are being coached or that an operator is listening.`, a blank line, then the closing. `/steer` rebuilds that same text and then appends the new operator note.
 
-`STYLE_AUTO_SELECT` is a JSON object such as `{"+15555550100":"warm-personal"}`. It applies in `resolveStyle` only when the `/call` body omits `style`. The key is matched after whitespace is stripped, exactly. An explicit `style` wins, including an unknown name, which still falls through to `custom`. Entries whose style is not a built-in or a loaded pack (or an alias of either) are dropped at startup with a warning. Invalid JSON is ignored. Warnings mask numbers. `/health` includes `styleAutoSelectCount` and never the map.
+`STYLE_AUTO_SELECT` is a JSON object such as `{"+15555550100":"warm-personal"}`. It applies in `resolveStyle` only when the `/call` body omits `style`. Whitespace in the key is stripped, then the key must be E.164, the same check as `to` (`+` and 2 to 15 digits). Any other key is dropped with a masked warning. An explicit `style` wins, including an unknown name, which still falls through to `custom`. Entries whose style is not a built-in or a loaded pack (or an alias of either) are dropped at startup with a warning. Invalid JSON is ignored. Warnings mask numbers. `/health` includes `styleAutoSelectCount` and `stylePackCount`, and never the map or the pack names.
 
 ## Docs
 
@@ -291,7 +291,7 @@ Instructions for a pack are: role, `Your goal for this call: <goal>`, the contex
 - **X-Twilio-Signature validation**: Runs on `/twiml-connect` only when `TWILIO_AUTH_TOKEN` is non-empty. The checked URL uses `PUBLIC_HOST`; a different host than the one Twilio signed returns 403.
 - **Recording** is on only when `ENABLE_RECORDING` is exactly `1`, unless that call sets `record`. `record: true` asks Twilio for dual-channel recording for that call even when the global flag is off. `record: false` turns it off for that call even when the global flag is on. The global default stays off. Recording can require consent from the people on the call.
 - **AI disclosure** stays on unless `SKIP_AI_DISCLOSURE` is exactly `1`. Per-call `discloseAi` overrides that for one call. `true` includes the block. `false` omits it.
-- **Style packs and auto-select:** pack file contents are never written to logs. A skipped pack logs the file name and a reason only. `STYLE_AUTO_SELECT` numbers are never written to logs unmasked. `/health` reports `styleAutoSelectCount` only.
+- **Style packs and auto-select:** pack file contents are never written to logs. A skipped pack logs the file name and a reason only. `STYLE_AUTO_SELECT` numbers are never written to logs unmasked, and a key that is not E.164 is dropped. Unauthenticated `/health` lists only the built-in style names plus `stylePackCount` and `styleAutoSelectCount`. It does not include pack names, aliases, or destination numbers.
 - **Privacy defaults:** The placed-call log masks the destination. `[call] error:`, `[hangup] Twilio update failed:`, `[twiml-connect] Error:`, `[http] unexpected error:`, `[http] 400 body parse error:`, and `[grok] error` log `err.message` after digit runs of 7 or more in that text are masked. The same mask covers `[grok] server error`, `[grok] JSON parse error`, `[twilio] JSON parse error`, and `[twilio] ws error`. The HTTP 500 body from `POST /call` uses it too. Spaces, hyphens, parentheses, and periods inside the run count. A letter or digit on either side is left alone, so Call SIDs and short error codes stay intact. A whole IPv4 address and a whole calendar date are left alone. That exemption is checked per whitespace-delimited token. An IPv4 address with leading zeros is not exempt. Dotted quads that parse as IPv4 (for example 123.45.67.89) are kept unmasked as IPv4. There is no epoch-millisecond exemption, so a 13-digit run is masked, including a run that starts with + and the country code. Transcript lines are written to stdout only when `LOG_TRANSCRIPTS` is exactly `1`.
 - Keep Twilio tokens, xAI keys, BRIDGE_API_KEY, and real phone numbers out of git.
 - Twilio needs a public WSS URL for Media Streams.

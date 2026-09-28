@@ -83,6 +83,7 @@ When the effective `softContinue` value is true:
 2. When Twilio reports that mark (playback drained), schedule a nudge after `SOFT_CONTINUE_MS`.
 3. Nudge injects a `[bridge-continue]` user item plus `response.create` so the agent keeps
    talking if the callee is quiet. A private pack can replace that nudge text with `softContinuePrompt`.
+   If that prompt does not contain `[[HANGUP_REQUESTED]]`, the generic hangup-token lines are appended.
 
 The effective value is the JSON boolean on `/call` when one is sent. Otherwise it is the pack's `softContinue` boolean when the selected style is a pack that sets one. Otherwise it is false. Built-in styles stay off unless the request sets `true`. VAD uses the soft thresholds only when the effective value is true.
 
@@ -95,7 +96,7 @@ The effective value is the JSON boolean on `/call` when one is sent. Otherwise i
 | `custom` | Goal + context only. Also the fallback for a style name that is still unknown. |
 | private pack | Loaded from `STYLE_PACKS_DIR`. See templates/styles.md. |
 
-`STYLE_AUTO_SELECT` maps a destination number to a style when `POST /call` omits `style`. An explicit `style` wins. `GET /health` reports `styleAutoSelectCount` and does not include the numbers.
+`STYLE_AUTO_SELECT` maps a destination number to a style when `POST /call` omits `style`. After whitespace is stripped, the key must be E.164 (`+` and 2 to 15 digits). An explicit `style` wins. `GET /health` is unauthenticated: `styles` lists only `support`, `restaurant-book`, and `custom`, and `stylePackCount` is the number of loaded packs. Pack names, aliases, and destination numbers are not included. `styleAutoSelectCount` is the number of kept map entries.
 
 ## Voice resolution
 

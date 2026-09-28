@@ -30,11 +30,21 @@ const CANARIES = [
   'CANARY_NOTES',
   'CANARY_NESTED',
   'CANARY_EXTRA_KEY',
+  'CANARY_LINKED',
 ];
 
 const GENERIC_NUDGE =
   '[bridge-continue] The other party is still on the line and quiet. Speak now: next 1–2 new sentences (or finish). Do not wait. Do not repeat yourself. If the call is done, say goodbye and include [[HANGUP_REQUESTED]].';
 const PACK_NUDGE = '[bridge-continue] Offer one short warm sentence, or finish the call.';
+const HANGUP_TOKEN_LINES = [
+  'say a brief polite closing if appropriate, then include the exact token [[HANGUP_REQUESTED]]',
+  'in your spoken or textual response so the bridge can detect it.',
+  'Do NOT hang up yourself — wait for the operator to approve hangup.',
+].join('\n');
+const PACK_NUDGE_WITH_TOKEN = `${PACK_NUDGE}\n${HANGUP_TOKEN_LINES}`;
+const TOKEN_PROMPT = 'Close now and include [[HANGUP_REQUESTED]].';
+const INVALID_AUTO_KEY = '15555550123';
+const PACK_COUNT = 4;
 
 const captured = [];
 const orig = {
@@ -93,6 +103,7 @@ function installFixtures() {
     role: 'You are placing a short phone call.',
     closing: 'Say goodbye and include [[HANGUP_REQUESTED]] once.',
     softContinue: false,
+    softContinuePrompt: TOKEN_PROMPT,
   });
   writeJson('16-generic-close.json', {
     name: 'generic-close',
@@ -132,6 +143,22 @@ function installFixtures() {
     role: 'CANARY_ALIAS_DUP should not load',
     aliases: ['warm'],
   });
+  const outside = path.join(tmp, 'outside');
+  fs.mkdirSync(outside);
+  fs.writeFileSync(
+    path.join(outside, 'pack.json'),
+    `${JSON.stringify({
+      name: 'linked-style',
+      description: 'Loaded through a symlink',
+      aliases: ['linked'],
+      role: 'You are placing a linked phone call.',
+      extraNote: 'CANARY_LINKED',
+      softContinue: false,
+    })}\n`
+  );
+  fs.symlinkSync(path.join(outside, 'pack.json'), path.join(tmp, '70-linked.json'));
+  fs.symlinkSync(outside, path.join(tmp, '80-dir-link.json'));
+  fs.symlinkSync(path.join(tmp, 'missing-target.json'), path.join(tmp, '90-broken.json'));
   fs.writeFileSync(path.join(tmp, 'notes.txt'), 'CANARY_NOTES +15555550166\n');
   fs.mkdirSync(path.join(tmp, 'nested'));
   fs.writeFileSync(
@@ -144,10 +171,14 @@ function installFixtures() {
   );
 }
 
-function request(port, method, urlPath, body) {
+function request(port, method, urlPath, body, options) {
+  const opts = options || {};
   return new Promise((resolve, reject) => {
     const payload = body == null ? null : JSON.stringify(body);
-    const headers = { Authorization: `Bearer ${process.env.BRIDGE_API_KEY}` };
+    const headers = {};
+    if (opts.auth !== false) {
+      headers.Authorization = `Bearer ${process.env.BRIDGE_API_KEY}`;
+    }
     if (payload != null) {
       headers['Content-Type'] = 'application/json';
       headers['Content-Length'] = Buffer.byteLength(payload);
@@ -274,6 +305,8 @@ async function main() {
     [MAPPED_SPACED]: 'warm-personal',
     [ALIAS_MAPPED]: 'warm',
     [UNKNOWN_TARGET]: 'no-such-style',
+    [INVALID_AUTO_KEY]: 'warm-personal',
+    '+1': 'support',
   });
 
   const autoSelectRaw = process.env.STYLE_AUTO_SELECT;
@@ -326,11 +359,25 @@ async function main() {
     'a duplicate alias is skipped'
   );
   assert(!skipLines.some((line) => line.includes('10-warm-personal.json')), 'the valid pack is not skipped');
-    assert(!skipLines.some((line) => line.includes('15-token-close.json')), 'the token closing pack is not skipped');
-    assert(!skipLines.some((line) => line.includes('16-generic-close.json')), 'a pack with no closing is not skipped');
+  assert(!skipLines.some((line) => line.includes('15-token-close.json')), 'the token closing pack is not skipped');
+  assert(!skipLines.some((line) => line.includes('16-generic-close.json')), 'a pack with no closing is not skipped');
+  assert(!skipLines.some((line) => line.includes('70-linked.json')), 'a symlink to a regular pack file is not skipped');
+  assert(
+    skipLines.some((line) => line.includes('80-dir-link.json') && line.includes('reason=not a regular file')),
+    'a symlink to a directory is not loaded as a pack'
+  );
+  assert(
+    skipLines.some((line) => line.includes('90-broken.json') && line.includes('reason=unreadable')),
+    'a broken symlink is skipped'
+  );
   assert(
     captured.some((line) => line.includes('unknown style') && line.includes('xxxxxxxx0199')),
     'unknown auto-select target is dropped and the number is masked'
+  );
+  assert(
+    captured.some((line) => line.includes('key must be E.164') && line.includes('xxxxxxx0123')) &&
+      !captured.some((line) => line.includes(INVALID_AUTO_KEY)),
+    'a non-E.164 auto-select key is dropped and the number is masked'
   );
 
   const calls = [];
@@ -347,14 +394,19 @@ async function main() {
   try {
     await new Promise((resolve) => httpServer.once('listening', resolve));
     const port = httpServer.address().port;
-    const health = await request(port, 'GET', '/health');
-    assert(health.status === 200 && health.json && health.json.ok === true, 'GET /health responds');
+    const health = await request(port, 'GET', '/health', null, { auth: false });
+    assert(health.status === 200 && health.json && health.json.ok === true, 'unauthenticated GET /health responds');
     const styles = (health.json && health.json.styles) || [];
-    for (const name of ['support', 'restaurant-book', 'custom', 'warm-personal', 'token-close', 'generic-close']) {
-      assert(styles.includes(name), `/health styles include ${name}`);
-    }
-    for (const name of ['warm', 'other-warm', 'polite-errand', 'nested-pack', 'bad-soft', 'no-such-style']) {
-      assert(!styles.includes(name), `/health styles omit ${name}`);
+    assert(
+      styles.length === 3 &&
+        styles[0] === 'support' &&
+        styles[1] === 'restaurant-book' &&
+        styles[2] === 'custom',
+      'unauthenticated /health styles lists only the built-ins'
+    );
+    assert(health.json.stylePackCount === PACK_COUNT, 'stylePackCount counts loaded packs');
+    for (const secret of ['warm-personal', 'warm', 'token-close', 'generic-close', 'linked-style', 'linked']) {
+      assert(!health.text.includes(secret), `unauthenticated /health does not include ${secret}`);
     }
     assert(health.json.styleAutoSelectCount === 2, 'styleAutoSelectCount counts only kept entries');
     assert(health.json.aiDisclosureDefault === true, 'aiDisclosureDefault is true when disclosure is on');
@@ -368,6 +420,13 @@ async function main() {
       style: 'warm',
     });
     assert(shaped.style === 'warm-personal', 'alias warm resolves to warm-personal');
+    const linked = createSession({
+      callSid: 'shape-linked',
+      goal: 'Confirm a dinner time',
+      style: 'linked',
+    });
+    assert(linked.style === 'linked-style', 'a symlinked pack file loads and its alias resolves');
+    assert(!linked.instructions.includes('CANARY_LINKED'), 'a symlinked pack ignores unknown keys');
     assert(shaped.softContinue === true, 'omitted softContinue uses the pack default');
     assert(shaped.vadThreshold === 0.72 && shaped.vadSilenceMs === 350, 'pack softContinue selects soft VAD');
     assert(!shaped.instructions.includes('CANARY_EXTRA_KEY'), 'unknown pack keys are not copied into instructions');
@@ -725,20 +784,39 @@ async function main() {
     });
     const nudgedSent = armNudge(nudged);
     handleGrokEvent(nudged, { type: 'response.done' });
-    const nudgedFired = await waitFor(() => nudgeText(nudgedSent) === PACK_NUDGE, 500);
-    assert(nudgedFired, 'scheduleSoftContinue uses the pack softContinuePrompt');
+    const nudgedFired = await waitFor(() => nudgeText(nudgedSent) === PACK_NUDGE_WITH_TOKEN, 500);
+    assert(nudgedFired, 'a pack prompt without the hangup token gets the generic token lines');
+    assert(
+      nudgedFired && nudgeText(nudgedSent).split('[[HANGUP_REQUESTED]]').length - 1 === 1,
+      'the appended prompt contains the hangup token once'
+    );
     assert(nudgeText(nudgedSent) !== GENERIC_NUDGE, 'the pack prompt replaces the generic nudge');
 
     const generic = createSession({
       callSid: 'nudge-generic',
       goal: 'Confirm a dinner time',
-      style: 'token-close',
+      style: 'generic-close',
       softContinue: true,
     });
     const genericSent = armNudge(generic);
     handleGrokEvent(generic, { type: 'response.done' });
     const genericFired = await waitFor(() => nudgeText(genericSent) === GENERIC_NUDGE, 500);
     assert(genericFired, 'a pack without softContinuePrompt keeps the generic nudge');
+
+    const tokenNudge = createSession({
+      callSid: 'nudge-token-prompt',
+      goal: 'Confirm a dinner time',
+      style: 'token-close',
+      softContinue: true,
+    });
+    const tokenSent = armNudge(tokenNudge);
+    handleGrokEvent(tokenNudge, { type: 'response.done' });
+    const tokenFired = await waitFor(() => nudgeText(tokenSent) === TOKEN_PROMPT, 500);
+    assert(tokenFired, 'a prompt that already has the hangup token is not extended');
+    assert(
+      tokenFired && nudgeText(tokenSent).split('[[HANGUP_REQUESTED]]').length - 1 === 1,
+      'a prompt that already has the hangup token keeps a single copy'
+    );
 
     const badJsonLines = [];
     const warnBefore = console.warn;
@@ -764,8 +842,11 @@ async function main() {
     loadStylePacksForTests(tmp);
     const reloaded = await request(port, 'GET', '/health');
     assert(
-      reloaded.json && reloaded.json.styles.includes('warm-personal') && reloaded.json.styles.includes('token-close'),
-      'reloading the pack directory restores the packs'
+      reloaded.json &&
+        reloaded.json.stylePackCount === PACK_COUNT &&
+        !reloaded.text.includes('warm-personal') &&
+        !reloaded.text.includes('linked-style'),
+      'reloading the pack directory restores the pack count without listing names'
     );
 
     const relativeBefore = captured.length;
@@ -814,6 +895,7 @@ async function main() {
     UNKNOWN_TARGET,
     UNMAPPED,
     SECRET_IN_BAD_JSON,
+    INVALID_AUTO_KEY,
     ...FILE_NUMBERS,
     '555555',
     '555 555',

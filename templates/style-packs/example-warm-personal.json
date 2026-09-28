@@ -12,5 +12,5 @@
     "When the goal is done or clearly impossible, thank them and say goodbye."
   ],
   "softContinue": false,
-  "softContinuePrompt": "[bridge-continue] The other person is quiet. Offer one short, warm next sentence, or close if the call is finished."
+  "softContinuePrompt": "[bridge-continue] The other person is quiet. Offer one short, warm next sentence, or close if the call is finished and include [[HANGUP_REQUESTED]]."
 }
