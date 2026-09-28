@@ -22,7 +22,7 @@ Read README.md and docs/architecture.md in the repository before improvising.
 2. Configure env from .env.example:
    TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM_NUMBER, XAI_API_KEY,
    optional XAI_VOICE, CONTACT_FULL_NAME, CONTACT_MOBILE, BARGE_IN_CONFIRM_MS,
-   SOFT_CONTINUE_MS, VOICE_ALIASES (JSON).
+   SOFT_CONTINUE_MS, VOICE_ALIASES (JSON), STYLE_PACKS_DIR, STYLE_AUTO_SELECT.
    **CRITICAL:** Set BRIDGE_API_KEY for deployments to protect operator routes.
 
 3. Set PUBLIC_HOST to a hostname Twilio can reach over WSS.
@@ -32,7 +32,7 @@ Read README.md and docs/architecture.md in the repository before improvising.
 5. Smoke-test: use the /call API toward a number you control, read /transcript, try /steer, then /hangup when done.
 
 6. Wire Caller bot persona from templates/caller-bot-persona.md (fill placeholders).
-   See templates/styles.md for support / restaurant-book / custom.
+   See templates/styles.md for support, restaurant-book, custom, and private style packs.
 
 ## Hard rules
 

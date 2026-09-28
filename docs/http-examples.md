@@ -19,13 +19,53 @@ Authorization: Bearer <BRIDGE_API_KEY>
   "to": "+15555550100",
   "goal": "Book a table for 2 tonight at 7pm, patio if available",
   "style": "restaurant-book",
-  "voice": "ara"
+  "voice": "ara",
+  "discloseAi": true,
+  "record": false
 }
 ```
 
+`style` is optional. Omit it (or send null or "") to let `STYLE_AUTO_SELECT` choose from the destination. An explicit style wins. An unknown explicit style still falls through to `custom`.
+
+`discloseAi` is an optional boolean. `true` includes the AI disclosure block for this call even when `SKIP_AI_DISCLOSURE` is exactly `1`. `false` omits it even when disclosure is on by default. The effective boolean is returned as `discloseAi` and stored on the session, so `/steer` rebuilds keep it. Any other JSON type is 400:
+
+```json
+{ "error": "discloseAi must be a boolean when provided" }
+```
+
+`record` is an optional boolean. `true` asks Twilio for dual-channel recording on this call even when `ENABLE_RECORDING` is off. `false` records nothing even when `ENABLE_RECORDING` is exactly `1`. The global default stays off. Recording can require consent from the people on the call. Review the consent laws that apply before setting `record` to true. The effective boolean is returned as `record`. Any other JSON type is 400:
+
+```json
+{ "error": "record must be a boolean when provided" }
+```
+
+`softContinue` is an optional boolean. It overrides the style default. When it is omitted, a private pack's `softContinue` boolean is used if that pack sets one, otherwise soft-continue is off.
+
+The response includes `style`, `softContinue`, `discloseAi`, and `record`.
+
+### Style pack file
+
+Private styles are JSON files in `STYLE_PACKS_DIR`, not fields on `/call`. `templates/style-packs/example-warm-personal.json` is an example only.
+
+```json
+{
+  "name": "warm-personal",
+  "description": "Warm, personal pacing. Example only.",
+  "aliases": ["warm"],
+  "role": "You are placing a phone call in a warm, personal tone.",
+  "coaching": ["Keep turns short.", "Do not invent personal details."],
+  "closing": "Thank them and say goodbye.",
+  "softContinue": false,
+  "softContinuePrompt": "[bridge-continue] Offer one short warm sentence, or finish the call."
+}
+```
+
+`name` must match `^[a-z0-9][a-z0-9-]{0,39}$`. `role` is required. `coaching` and `closing` are a string or an array of strings. Unknown keys are ignored. A closing that does not contain `[[HANGUP_REQUESTED]]` gets the generic hangup-token lines appended. Pack contents are never written to logs.
+
+
 ## POST /steer
 
-Each call replaces prior operator coaching. Instructions are rebuilt from the call goal, context, and style; earlier steer text is not accumulated.
+Each call replaces prior operator coaching. Instructions are rebuilt from the call goal, context, style, private pack text, and the per-call `discloseAi` choice. Earlier steer text is not accumulated.
 
 `respond` defaults to true. `false` updates instructions and does not force a reply. Only a JSON boolean is accepted.
 

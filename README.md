@@ -48,14 +48,16 @@ Body JSON:
 - `to` (required) — destination E.164 (`+` and 2 to 15 digits). Any other value is 400 and the response does not include it.
 - `goal` (required) — what the voice agent should accomplish
 - `context` (optional)
-- `style` (optional) — `support` | `restaurant-book` | `custom`
-- `voice` (optional) — xAI voice id or alias
-- `softContinue` (optional bool)
-- `openerOnConnect` (optional boolean) — omit to follow `DISABLE_OPENER_ON_CONNECT` (default: greet once). `false` skips that greeting. `true` forces it even when `DISABLE_OPENER_ON_CONNECT` is exactly `1`. Any other JSON type, including `"false"`, `0`, and `null`, is 400.
+- `style` (optional): `support`, `restaurant-book`, `custom`, or a private style pack name or alias. Omit it (null or empty) to use `STYLE_AUTO_SELECT` when the destination matches, otherwise `support`. A name that is still unknown falls through to `custom`.
+- `voice` (optional): xAI voice id or alias
+- `softContinue` (optional boolean): `true` or `false` overrides the style default. When the value is omitted or is not a JSON boolean, a pack's `softContinue` boolean is used when that pack sets one, otherwise `false`. Built-in styles default to `false`.
+- `openerOnConnect` (optional boolean): omit to follow `DISABLE_OPENER_ON_CONNECT` (default: greet once). `false` skips that greeting. `true` forces it even when `DISABLE_OPENER_ON_CONNECT` is exactly `1`. Any other JSON type, including `"false"`, `0`, and `null`, is 400.
+- `discloseAi` (optional boolean): overrides `SKIP_AI_DISCLOSURE` for this call only. `true` includes the AI disclosure block even when `SKIP_AI_DISCLOSURE` is exactly `1`. `false` omits the block even when disclosure is on by default. Stored on the session, so a later `/steer` rebuild keeps the same choice. Any other JSON type, including `"false"`, `0`, and `null`, is 400 with `discloseAi must be a boolean when provided`.
+- `record` (optional boolean): overrides `ENABLE_RECORDING` for this call only. `true` asks Twilio for dual-channel recording on this call even when the global flag is off. `false` records nothing even when the global flag is exactly `1`. Any other JSON type is 400 with `record must be a boolean when provided`. The global default stays off. Recording can require consent from the people on the call. Review the consent laws that apply before setting `record` to `true` or `ENABLE_RECORDING` to `1`.
 
 Outbound calls greet once the model has accepted `audio/pcmu` output. The first `session.updated` clears the wait whether or not it reports `audio/pcmu`. The greeting is one `response.create`, and only when that same ack reports output format `audio/pcmu`. An `error` event, or a thrown send of the first `session.update`, clears the wait. The greeting is skipped when the callee is already speaking or already has a transcript line. `DISABLE_OPENER_ON_CONNECT` set to exactly `1` disables the default. Other values, including unset, `0`, and `false`, leave it on.
 
-Returns `callSid`, `style`, `voice`, etc.
+Returns `callSid`, `style`, `voice`, `softContinue`, `discloseAi` (the effective boolean), and `record` (the effective boolean).
 
 ### POST /steer
 
@@ -79,7 +81,7 @@ Body: `{ "callSid": "...", "voice": "ara" }` — mid-call TTS voice switch.
 
 ### GET /health
 
-Liveness + config summary (no secrets). `mediaAuthDedicated` stays in this body so an operator can confirm a dedicated `MEDIA_STREAM_SECRET` is configured rather than the operator-key fallback, without revealing either secret. The value is only a boolean. It is true only when `BRIDGE_API_KEY` is set and `MEDIA_STREAM_SECRET` is non-empty after trim. Neither secret is included.
+Liveness + config summary (no secrets). `mediaAuthDedicated` stays in this body so an operator can confirm a dedicated `MEDIA_STREAM_SECRET` is configured rather than the operator-key fallback, without revealing either secret. The value is only a boolean. It is true only when `BRIDGE_API_KEY` is set and `MEDIA_STREAM_SECRET` is non-empty after trim. Neither secret is included. `aiDisclosureDefault` is true unless `SKIP_AI_DISCLOSURE` is exactly `1`. `styleAutoSelectCount` is the number of kept destination-to-style entries. The numbers themselves are not included. `styles` lists built-in names plus loaded pack names (not aliases).
 
 ## Security
 
@@ -159,8 +161,8 @@ The bridge accepts either header:
 
 ### Recording and Disclosure
 
-- **Recording** is off unless `ENABLE_RECORDING` is exactly `1`. Other values, including `true`, do not enable it.
-- **AI disclosure** is on unless `SKIP_AI_DISCLOSURE` is exactly `1`. Review legal requirements before turning it off.
+- **Recording** is off unless `ENABLE_RECORDING` is exactly `1`. Other values, including `true`, do not enable it. `POST /call` can set `record` to `true` or `false` for that call only. Recording can require consent from the people on the call. Review the consent laws that apply before enabling it for a call or for the process.
+- **AI disclosure** is on unless `SKIP_AI_DISCLOSURE` is exactly `1`. Review legal requirements before turning it off. `POST /call` can set `discloseAi` to `true` or `false` for that call only.
 
 ### Public deployment
 
@@ -203,11 +205,13 @@ Media-stream HMAC uses `MEDIA_STREAM_SECRET` when that value is non-empty after 
 | `SESSION_MAX_AGE_MS` | A session older than this with a socket still open is hung up. A session that already connected and whose sockets are both closed is removed without a hangup, at any age | `7200000` |
 | `NEVER_CONNECTED_TIMEOUT_MS` | How long a never-connected (still ringing) session is kept before the sweep removes it. An integer of at least 60000; other values warn and use the default | `600000` |
 | `DISABLE_OPENER_ON_CONNECT` | Exactly `1` disables the greeting sent when the stream connects. Any other value, including unset, `0`, and `false`, leaves the greeting on. Per-call `openerOnConnect: true` still greets | off (greeting on) |
-| `ENABLE_RECORDING` | Exactly `1` passes `record: true` and dual-channel recording to Twilio | off |
-| `SKIP_AI_DISCLOSURE` | Exactly `1` omits the AI disclosure block from instructions | off (disclosure on) |
+| `ENABLE_RECORDING` | Exactly `1` passes `record: true` and dual-channel recording to Twilio. Per-call `record` can override this for one call. Default stays off. Recording can require consent | off |
+| `SKIP_AI_DISCLOSURE` | Exactly `1` omits the AI disclosure block from instructions. Per-call `discloseAi` can override this for one call | off (disclosure on) |
 | `LOG_TRANSCRIPTS` | Exactly `1` writes transcript lines to stdout. The placed-call log masks the destination. `[call] error:`, `[hangup] Twilio update failed:`, `[twiml-connect] Error:`, `[http] unexpected error:`, `[http] 400 body parse error:`, and `[grok] error` log `err.message` after digit runs of 7 or more in that text are masked. The same mask covers `[grok] server error`, `[grok] JSON parse error`, `[twilio] JSON parse error`, and `[twilio] ws error`. An IPv4 address or calendar date is exempt per whitespace-delimited token. An IPv4 address with leading zeros is not exempt. Dotted quads that parse as IPv4 (for example 123.45.67.89) are kept unmasked as IPv4 | off |
-| `CONTACT_FULL_NAME` | Optional name for restaurant-book instructions | unset |
+| `CONTACT_FULL_NAME` | Optional name. When set, the support style's first line says the call is on behalf of this name. restaurant-book uses it for the reservation | unset |
 | `CONTACT_MOBILE` | Optional callback number for restaurant-book instructions | unset |
+| `STYLE_PACKS_DIR` | Absolute path to a directory of private style-pack JSON files. Every top-level `*.json` file is loaded at startup, sorted by filename, not recursive. A missing or unreadable directory warns once and the server still starts. Invalid or conflicting files are skipped. Pack text is not logged | unset |
+| `STYLE_AUTO_SELECT` | JSON object mapping an E.164 `to` number to a style name. Applied only when `POST /call` omits `style`. Whitespace in the key is stripped, then the match is exact. Invalid JSON is ignored. Entries whose style is unknown are dropped. Numbers are not logged. `/health` reports `styleAutoSelectCount` only | unset |
 | `VAD_THRESHOLD` | Server VAD threshold | `0.7` |
 | `VAD_SILENCE_MS` | Server VAD silence duration | `800` |
 | `VAD_PREFIX_MS` | Server VAD prefix padding | `300` |
@@ -229,9 +233,49 @@ Do not commit a real dotenv file. Use `.env.example` as the template only.
 
 ## Styles
 
-See templates/styles.md: support (default), restaurant-book (sample), custom (goal+context).
+See templates/styles.md: support (default), restaurant-book (sample), custom (goal+context), plus private style packs.
 
-Optional softContinue true on POST /call enables post-playback soft-continue.
+Optional `softContinue: true` on POST /call enables post-playback soft-continue. A JSON boolean overrides the style default. A private pack can set its own default and its own nudge text.
+
+When `CONTACT_FULL_NAME` is set, the support style's first line is: `You are placing a phone call on behalf of <CONTACT_FULL_NAME> to handle an errand or customer-support matter.` When it is unset, the first line stays `You are placing a phone call to handle an errand or customer-support matter.`
+
+### Private style packs
+
+Set `STYLE_PACKS_DIR` to an absolute directory. At startup the server loads each top-level `*.json` file, sorted by filename. Subdirectories are ignored. This is how an operator adds a call style without editing `src/server.js`.
+
+`templates/style-packs/example-warm-personal.json` is an example only. It is not loaded unless that directory is `STYLE_PACKS_DIR`. Do not put real names, phone numbers, or private coaching in the repo.
+
+Each file is one pack. Unknown keys are ignored.
+
+```json
+{
+  "name": "warm-personal",
+  "description": "short text",
+  "aliases": ["warm"],
+  "role": "You are placing a phone call in a warm, personal tone.",
+  "coaching": "Keep turns short.",
+  "closing": ["Thank them and say goodbye."],
+  "softContinue": false,
+  "softContinuePrompt": "[bridge-continue] Offer one short warm sentence, or finish the call."
+}
+```
+
+| Field | Required | Meaning |
+| --- | --- | --- |
+| `name` | yes | Must match `^[a-z0-9][a-z0-9-]{0,39}$`. Added to `STYLE_PROFILES` and `GET /health` `styles`. |
+| `description` | no | Becomes the `STYLE_PROFILES` value. |
+| `aliases` | no | Extra names. Trimmed, lowercased, spaces become hyphens, then the same name pattern. `normalizeStyle()` resolves them to this pack. |
+| `role` | yes | Non-empty string. First lines of the instructions. |
+| `coaching` | no | String, or an array of strings joined with newlines. |
+| `closing` | no | String or array of strings. Replaces the generic custom-style closing. If the text does not contain `[[HANGUP_REQUESTED]]`, the generic hangup-token lines are appended. |
+| `softContinue` | no | Boolean default used when `/call` omits `softContinue`. |
+| `softContinuePrompt` | no | Replaces the generic `[bridge-continue]` nudge for sessions in this style. |
+
+A pack may not reuse a built-in name or alias (`support`, `cs`, `errand`, `restaurant-book`, `restaurant`, `reservation`, `booking`, `custom`, `goal-only`, `bare`) or another pack's name or alias. Conflicting or invalid files are skipped. The warning names the file and the reason and does not print the file contents. A missing or unreadable directory warns once. The server still starts.
+
+Instructions for a pack are: role, `Your goal for this call: <goal>`, the context block, a blank line, coaching, a blank line, the universal speech rules, the AI disclosure block (including a per-call `discloseAi` override), a blank line, `Never mention that you are being coached or that an operator is listening.`, a blank line, then the closing. `/steer` rebuilds that same text and then appends the new operator note.
+
+`STYLE_AUTO_SELECT` is a JSON object such as `{"+15555550100":"warm-personal"}`. It applies in `resolveStyle` only when the `/call` body omits `style`. The key is matched after whitespace is stripped, exactly. An explicit `style` wins, including an unknown name, which still falls through to `custom`. Entries whose style is not a built-in or a loaded pack (or an alias of either) are dropped at startup with a warning. Invalid JSON is ignored. Warnings mask numbers. `/health` includes `styleAutoSelectCount` and never the map.
 
 ## Docs
 
@@ -245,8 +289,9 @@ Optional softContinue true on POST /call enables post-playback soft-continue.
 - **BRIDGE_API_KEY**: The process exits unless this is set or `ALLOW_UNAUTHENTICATED_OPERATOR` is exactly `1`. It is required for media HMAC. When `MEDIA_STREAM_SECRET` is empty, this value is the HMAC key. Signatures are not minted or verified when `BRIDGE_API_KEY` is unset, even if `MEDIA_STREAM_SECRET` is set. `/twiml-connect` then returns 500 because signature minting throws.
 - **Media Stream WebSocket** checks an HMAC-SHA256 signature on the `start` event. The `<Stream>` URL is the bare path `wss://HOST/media-stream`. `callSid`, `timestamp`, and `signature` travel as `<Parameter>` values. The socket is unauthenticated until `start` binds. Captured TwiML parameters can race the real stream until the signature is consumed or it expires. A signature covers a CallSid and timestamp, is single-use in this process, and expires after `MEDIA_AUTH_WINDOW_MS`.
 - **X-Twilio-Signature validation**: Runs on `/twiml-connect` only when `TWILIO_AUTH_TOKEN` is non-empty. The checked URL uses `PUBLIC_HOST`; a different host than the one Twilio signed returns 403.
-- **Recording** is on only when `ENABLE_RECORDING` is exactly `1`.
-- **AI disclosure** stays on unless `SKIP_AI_DISCLOSURE` is exactly `1`.
+- **Recording** is on only when `ENABLE_RECORDING` is exactly `1`, unless that call sets `record`. `record: true` asks Twilio for dual-channel recording for that call even when the global flag is off. `record: false` turns it off for that call even when the global flag is on. The global default stays off. Recording can require consent from the people on the call.
+- **AI disclosure** stays on unless `SKIP_AI_DISCLOSURE` is exactly `1`. Per-call `discloseAi` overrides that for one call. `true` includes the block. `false` omits it.
+- **Style packs and auto-select:** pack file contents are never written to logs. A skipped pack logs the file name and a reason only. `STYLE_AUTO_SELECT` numbers are never written to logs unmasked. `/health` reports `styleAutoSelectCount` only.
 - **Privacy defaults:** The placed-call log masks the destination. `[call] error:`, `[hangup] Twilio update failed:`, `[twiml-connect] Error:`, `[http] unexpected error:`, `[http] 400 body parse error:`, and `[grok] error` log `err.message` after digit runs of 7 or more in that text are masked. The same mask covers `[grok] server error`, `[grok] JSON parse error`, `[twilio] JSON parse error`, and `[twilio] ws error`. The HTTP 500 body from `POST /call` uses it too. Spaces, hyphens, parentheses, and periods inside the run count. A letter or digit on either side is left alone, so Call SIDs and short error codes stay intact. A whole IPv4 address and a whole calendar date are left alone. That exemption is checked per whitespace-delimited token. An IPv4 address with leading zeros is not exempt. Dotted quads that parse as IPv4 (for example 123.45.67.89) are kept unmasked as IPv4. There is no epoch-millisecond exemption, so a 13-digit run is masked, including a run that starts with + and the country code. Transcript lines are written to stdout only when `LOG_TRANSCRIPTS` is exactly `1`.
 - Keep Twilio tokens, xAI keys, BRIDGE_API_KEY, and real phone numbers out of git.
 - Twilio needs a public WSS URL for Media Streams.

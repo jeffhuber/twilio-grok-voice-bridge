@@ -77,24 +77,25 @@ timer (`BARGE_IN_CONFIRM_MS`, default ~280ms). If user speech is still active af
 
 ## Soft-continue
 
-When enabled (`softContinue: true` on `/call`):
+When the effective `softContinue` value is true:
 
 1. On Grok `response.done`, bridge sends a Twilio `mark`.
 2. When Twilio reports that mark (playback drained), schedule a nudge after `SOFT_CONTINUE_MS`.
-3. Nudge injects a generic `[bridge-continue]` user item + `response.create` so the agent keeps
-   talking if the callee is quiet.
+3. Nudge injects a `[bridge-continue]` user item plus `response.create` so the agent keeps
+   talking if the callee is quiet. A private pack can replace that nudge text with `softContinuePrompt`.
 
-Disabled by default for `support` / `restaurant-book` unless requested.
+The effective value is the JSON boolean on `/call` when one is sent. Otherwise it is the pack's `softContinue` boolean when the selected style is a pack that sets one. Otherwise it is false. Built-in styles stay off unless the request sets `true`. VAD uses the soft thresholds only when the effective value is true.
 
 ## Styles
 
 | Style | Coaching |
 |-------|----------|
-| `support` (default) | Generic errand/CS pacing |
+| `support` (default) | Generic errand/CS pacing. When `CONTACT_FULL_NAME` is set, the first line says the call is on behalf of that name. |
 | `restaurant-book` | Sample reservation coaching using `CONTACT_FULL_NAME` / `CONTACT_MOBILE` |
-| `custom` | Goal + context only |
+| `custom` | Goal + context only. Also the fallback for a style name that is still unknown. |
+| private pack | Loaded from `STYLE_PACKS_DIR`. See templates/styles.md. |
 
-There is **no** auto-style-by-destination-number.
+`STYLE_AUTO_SELECT` maps a destination number to a style when `POST /call` omits `style`. An explicit `style` wins. `GET /health` reports `styleAutoSelectCount` and does not include the numbers.
 
 ## Voice resolution
 

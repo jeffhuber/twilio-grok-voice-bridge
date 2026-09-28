@@ -89,7 +89,7 @@ Use `.env` (gitignored) or secret management systems for deployments.
 - [ ] Enable HTTPS/WSS (Twilio Media Streams require WSS)
 - [ ] Configure `SESSION_MAX_AGE_MS` for your use case (default 2 hours)
 - [ ] Review AI disclosure requirements for your jurisdiction
-- [ ] Enable recording only if required (`ENABLE_RECORDING=1`) and comply with consent laws
+- [ ] Enable recording only if required (`ENABLE_RECORDING=1`, or per-call `record: true`) and comply with consent laws
 - [ ] Keep `LOG_TRANSCRIPTS` disabled (default) unless actively debugging
 - [ ] Use Cloudflare Access, VPN, or IP allowlists for additional access control
 - [ ] Configure Twilio billing alerts and rate limits in Twilio Console
