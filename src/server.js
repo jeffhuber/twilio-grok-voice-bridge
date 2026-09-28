@@ -2521,7 +2521,10 @@ module.exports = {
 // loaded. nodeEnvFromShell is that value, captured before dotenv, so
 // NODE_ENV=test in .env does not export these setters.
 // Refuse export when dotenv was preloaded via -r/--require/--import dotenv/config
-// (relative or absolute path) or --env-file in process.execArgv or NODE_OPTIONS.
+// (in execArgv or NODE_OPTIONS); --env-file (always) in execArgv; or
+// --env-file-if-exists (only when the target file exists) in execArgv.
+// NODE_OPTIONS is also checked for --env-file* for defense in depth, even though
+// Node rejects those flags there.
 function isDotenvPreloaded() {
   function fileExists(path) {
     try {
@@ -2563,9 +2566,9 @@ function isDotenvPreloaded() {
       const arg = process.execArgv[i];
       const next = process.execArgv[i + 1];
       if (checkArg(arg, next)) return true;
-      // When arg is a flag that takes a value in the next position, skip that value
-      // to avoid treating it as a separate flag. Without this, 'dotenv/config' after
-      // -r would match the dotenv/config check on the next iteration.
+      // The token after -r/--require/--import/--env-file-if-exists is that flag's
+      // value, already evaluated via nextArg, so skip it to avoid re-parsing a
+      // module specifier or file path as its own flag.
       if (arg === '-r' || arg === '--require' || arg === '--import' || arg === '--env-file-if-exists') {
         i++;
       }
@@ -2580,6 +2583,7 @@ function isDotenvPreloaded() {
       const token = tokens[i];
       const next = tokens[i + 1];
       if (checkArg(token, next)) return true;
+      // Same skip logic as execArgv: the next token is the flag's value.
       if (token === '-r' || token === '--require' || token === '--import' || token === '--env-file-if-exists') {
         i++;
       }
