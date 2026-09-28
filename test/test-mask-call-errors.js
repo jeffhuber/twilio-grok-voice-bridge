@@ -275,42 +275,25 @@ function probeSetterExportWithPreload(nodeEnv, dotenvBody, options) {
     if (dotenvBody != null) {
       fs.writeFileSync(path.join(tmp, '.env'), dotenvBody, { mode: 0o600 });
     }
-    
-    // Special handling for chdir test (needs custom script)
-    if (opts.preloadType === 'env-file-if-exists-chdir') {
-      const script = [
-        'const origCwd = process.cwd();',
-        'process.chdir("/");',
-        '// Capture NODE_ENV and sentinel BEFORE require(server), so we see preload state before server dotenv.config',
-        'const preNodeEnv = Object.prototype.hasOwnProperty.call(process.env, "NODE_ENV") ? process.env.NODE_ENV : null;',
-        'const preSentinel = process.env.DOTENV_PRELOAD_SENTINEL || null;',
-        'const server = require(' + JSON.stringify(path.join(__dirname, '..', 'src', 'server.js')) + ');',
-        'const names = ["setTwilioClientForTests", "setGrokRealtimeUrlForTests"];',
-        'const leaked = names.filter((name) => typeof server[name] !== "undefined");',
-        'process.stdout.write(JSON.stringify({ leaked: leaked, preNodeEnv: preNodeEnv, preSentinel: preSentinel }));',
-        'process.exit(leaked.length ? 1 : 0);',
-      ].join('\n');
-      const execArgv = ['--env-file-if-exists', '.env'];
-      const result = spawnSync(process.execPath, [...execArgv, '-e', script], {
-        cwd: tmp,
-        env,
-        encoding: 'utf8',
-        timeout: 8000,
-      });
-      return result;
-    }
-    
+
     const dotenvConfigPath = require.resolve('dotenv/config');
-    const script = [
+    const scriptLines = [
       '// Capture NODE_ENV and sentinel BEFORE require(server), so we see preload state before server dotenv.config',
       'const preNodeEnv = Object.prototype.hasOwnProperty.call(process.env, "NODE_ENV") ? process.env.NODE_ENV : null;',
-      'const preSentinel = process.env.DOTENV_PRELOAD_SENTINEL || null;',
+      'const preSentinel = process.env.DOTENV_PRELOAD_SENTINEL || null;'
+    ];
+    // Special handling for chdir test: chdir after capture but before require
+    if (opts.preloadType === 'env-file-if-exists-chdir') {
+      scriptLines.push('process.chdir("/");');
+    }
+    scriptLines.push(
       'const server = require(' + JSON.stringify(path.join(__dirname, '..', 'src', 'server.js')) + ');',
       'const names = ["setTwilioClientForTests", "setGrokRealtimeUrlForTests"];',
       'const leaked = names.filter((name) => typeof server[name] !== "undefined");',
       'process.stdout.write(JSON.stringify({ leaked: leaked, preNodeEnv: preNodeEnv, preSentinel: preSentinel }));',
-      'process.exit(leaked.length ? 1 : 0);',
-    ].join('\n');
+      'process.exit(leaked.length ? 1 : 0);'
+    );
+    const script = scriptLines.join('\n');
     let execArgv = [];
     if (opts.preloadType === 'require-execArgv') {
       execArgv = ['-r', dotenvConfigPath];
@@ -336,6 +319,9 @@ function probeSetterExportWithPreload(nodeEnv, dotenvBody, options) {
       const dirPath = path.join(tmp, 'testdir');
       fs.mkdirSync(dirPath, { recursive: true });
       execArgv = ['--env-file-if-exists', dirPath];
+    } else if (opts.preloadType === 'env-file-if-exists-chdir') {
+      // Test cwd drift: relative path, chdir away in script before require
+      execArgv = ['--env-file-if-exists', '.env'];
     } else if (opts.preloadType === 'env-file-if-exists-enotdir') {
       // Test ENOTDIR: path under a regular file
       const regularFile = path.join(tmp, 'regular.txt');
@@ -384,7 +370,7 @@ function assertProductionExportOmitsTestSetters() {
 function assertPreloadRefusesTestSetters() {
   const dotenvTest = 'NODE_ENV=test\nDOTENV_PRELOAD_SENTINEL=loaded\n';
   const failures = [];
-  
+
   // Positive case: shell NODE_ENV=test still exports them
   const positiveResult = probeSetterExport('test', null);
   if (positiveResult.error) {
@@ -402,7 +388,7 @@ function assertPreloadRefusesTestSetters() {
       pass('dotenv preload positive case: shell NODE_ENV=test exports setters');
     }
   }
-  
+
   // Control case: no preload flag, .env with NODE_ENV=test, confirm pre-require values are absent
   const controlResult = probeSetterExportWithPreload(undefined, dotenvTest, { preloadType: 'none' });
   if (controlResult.error) {
@@ -453,28 +439,28 @@ function assertPreloadRefusesTestSetters() {
       failures.push(`${variant.label}: child exited without a setter report`);
       continue;
     }
-    
+
     // Positively assert the preload took effect (check pre-require values)
     const preloadTookEffect = report.preNodeEnv === 'test' || report.preSentinel === 'loaded';
     if (!preloadTookEffect) {
       failures.push(`${variant.label}: preload did not take effect (preNodeEnv=${report.preNodeEnv}, preSentinel=${report.preSentinel})`);
       continue;
     }
-    
+
     if (report.leaked.length !== 0) {
       failures.push(`${variant.label}: setters still exported (${report.leaked.join(', ')}) despite preload`);
       continue;
     }
-    
+
     pass(`${variant.label} omits test setters when .env sets NODE_ENV=test`);
   }
-  
-  // Test --env-file-if-exists with missing files (should export setters)
+
+  // Test --env-file-if-exists with ABSOLUTE missing paths (should export setters)
   const missingTests = [
-    { preloadType: 'env-file-if-exists-missing', label: '--env-file-if-exists <missing> (space-separated)' },
-    { preloadType: 'env-file-if-exists-missing-equals', label: '--env-file-if-exists=<missing> (equals form)' },
+    { preloadType: 'env-file-if-exists-missing', label: '--env-file-if-exists <missing absolute> (space-separated)' },
+    { preloadType: 'env-file-if-exists-missing-equals', label: '--env-file-if-exists=<missing absolute> (equals form)' },
   ];
-  
+
   for (const test of missingTests) {
     const result = probeSetterExportWithPreload('test', null, test);
     if (result.error) {
@@ -488,14 +474,16 @@ function assertPreloadRefusesTestSetters() {
       }
       if (!report || !Array.isArray(report.leaked)) {
         failures.push(`${test.label}: child exited without a setter report`);
+      } else if (report.preNodeEnv !== 'test') {
+        failures.push(`${test.label}: shell NODE_ENV was not test`);
       } else if (report.leaked.length === 0) {
-        failures.push(`${test.label}: setters were NOT exported (should export when file is missing)`);
+        failures.push(`${test.label}: setters were NOT exported (should export when absolute path is missing)`);
       } else {
-        pass(`${test.label} exports setters (file does not exist, no preload)`);
+        pass(`${test.label} exports setters (absolute missing path, no preload)`);
       }
     }
   }
-  
+
   // Test relative paths resolved against cwd
   const relativeExistingResult = probeSetterExportWithPreload(undefined, dotenvTest, { preloadType: 'env-file-if-exists-relative-existing' });
   if (relativeExistingResult.error) {
@@ -517,8 +505,8 @@ function assertPreloadRefusesTestSetters() {
       pass('--env-file-if-exists .env (relative, existing) refuses (file exists in cwd)');
     }
   }
-  
-  const relativeMissingResult = probeSetterExportWithPreload(undefined, null, { preloadType: 'env-file-if-exists-relative-missing' });
+
+  const relativeMissingResult = probeSetterExportWithPreload('test', null, { preloadType: 'env-file-if-exists-relative-missing' });
   if (relativeMissingResult.error) {
     failures.push(`--env-file-if-exists missing.env (relative, missing): ${relativeMissingResult.error.message}`);
   } else {
@@ -530,13 +518,15 @@ function assertPreloadRefusesTestSetters() {
     }
     if (!relMissReport || !Array.isArray(relMissReport.leaked)) {
       failures.push('--env-file-if-exists missing.env (relative, missing): child exited without a setter report');
+    } else if (relMissReport.preNodeEnv !== 'test') {
+      failures.push('--env-file-if-exists missing.env (relative, missing): shell NODE_ENV was not test');
     } else if (relMissReport.leaked.length !== 0) {
       failures.push(`--env-file-if-exists missing.env (relative, missing): setters still exported (${relMissReport.leaked.join(', ')}) when relative path is missing (cwd drift risk)`);
     } else {
       pass('--env-file-if-exists missing.env (relative, missing) refuses (cwd drift prevention)');
     }
   }
-  
+
   // Test mixed: one missing + one existing (should refuse because one exists)
   const mixedResult = probeSetterExportWithPreload(undefined, dotenvTest, { preloadType: 'env-file-if-exists-mixed' });
   if (mixedResult.error) {
@@ -558,7 +548,7 @@ function assertPreloadRefusesTestSetters() {
       pass('--env-file-if-exists mixed (missing + existing) refuses (one file exists)');
     }
   }
-  
+
   // Test fail-closed: directory instead of file
   const dirResult = probeSetterExportWithPreload(undefined, dotenvTest, { preloadType: 'env-file-if-exists-directory' });
   // Node refuses to start when --env-file-if-exists points to a directory
@@ -581,7 +571,7 @@ function assertPreloadRefusesTestSetters() {
       pass('--env-file-if-exists <directory> refuses (fail-closed: directory exists but is not a file)');
     }
   }
-  
+
   // Test cwd drift: relative path with chdir before require
   const chdirResult = probeSetterExportWithPreload(undefined, dotenvTest, { preloadType: 'env-file-if-exists-chdir' });
   if (chdirResult.error) {
@@ -595,15 +585,17 @@ function assertPreloadRefusesTestSetters() {
     }
     if (!chdirReport || !Array.isArray(chdirReport.leaked)) {
       failures.push('--env-file-if-exists with chdir: child exited without a setter report');
+    } else if (!chdirReport.preSentinel || chdirReport.preNodeEnv !== 'test') {
+      failures.push(`--env-file-if-exists with chdir: preload did not take effect (preNodeEnv=${chdirReport.preNodeEnv}, preSentinel=${chdirReport.preSentinel})`);
     } else if (chdirReport.leaked.length !== 0) {
       failures.push(`--env-file-if-exists with chdir: setters still exported (${chdirReport.leaked.join(', ')}) after chdir (cwd drift)`);
     } else {
       pass('--env-file-if-exists with chdir refuses (cwd drift prevented)');
     }
   }
-  
+
   // Test fail-closed: ENOTDIR (path component is a file, not directory)
-  const enotdirResult = probeSetterExportWithPreload(undefined, dotenvTest, { preloadType: 'env-file-if-exists-enotdir' });
+  const enotdirResult = probeSetterExportWithPreload('test', null, { preloadType: 'env-file-if-exists-enotdir' });
   if (enotdirResult.error) {
     failures.push(`--env-file-if-exists ENOTDIR: ${enotdirResult.error.message}`);
   } else {
@@ -615,6 +607,8 @@ function assertPreloadRefusesTestSetters() {
     }
     if (!enotdirReport || !Array.isArray(enotdirReport.leaked)) {
       failures.push('--env-file-if-exists ENOTDIR: child exited without a setter report');
+    } else if (enotdirReport.preNodeEnv !== 'test') {
+      failures.push('--env-file-if-exists ENOTDIR: shell NODE_ENV was not test');
     } else if (enotdirReport.leaked.length !== 0) {
       failures.push(`--env-file-if-exists ENOTDIR: setters still exported (${enotdirReport.leaked.join(', ')}) with ENOTDIR error (should fail-closed)`);
     } else {
