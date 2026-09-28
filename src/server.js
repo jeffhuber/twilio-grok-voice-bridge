@@ -15,6 +15,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const http = require('http');
 const net = require('net');
+const path = require('path');
 const express = require('express');
 const WebSocket = require('ws');
 const twilio = require('twilio');
@@ -2522,16 +2523,22 @@ module.exports = {
 // NODE_ENV=test in .env does not export these setters.
 // Refuse export when dotenv was preloaded via -r/--require/--import dotenv/config
 // (in execArgv or NODE_OPTIONS); --env-file (always) in execArgv; or
-// --env-file-if-exists (only when the target file exists) in execArgv.
-// NODE_OPTIONS is also checked for --env-file* for defense in depth, even though
-// Node rejects those flags there.
+// --env-file-if-exists (only when the target file exists, or when the target is
+// relative and cannot be found) in execArgv. Relative --env-file-if-exists paths
+// refuse on ENOENT to prevent cwd drift (process.chdir before require). Only
+// absolute missing paths may export. NODE_OPTIONS is also checked for --env-file*
+// for defense in depth, even though Node rejects those flags there.
 function isDotenvPreloaded() {
-  function fileExists(path) {
+  function fileExists(targetPath) {
     try {
-      fs.statSync(path);
+      fs.statSync(targetPath);
       return true;
     } catch (err) {
-      if (err.code === 'ENOENT') return false;
+      if (err.code === 'ENOENT') {
+        // Missing file: refuse if relative (cwd drift risk), allow if absolute
+        return !path.isAbsolute(targetPath);
+      }
+      // Any other error (ENOTDIR, EACCES, etc.): fail closed
       return true;
     }
   }
