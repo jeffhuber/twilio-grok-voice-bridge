@@ -297,6 +297,20 @@ function probeSetterExportWithPreload(nodeEnv, dotenvBody, options) {
       execArgv = ['--env-file-if-exists', path.join(tmp, '.env')];
     } else if (opts.preloadType === 'env-file-if-exists-equals') {
       execArgv = [`--env-file-if-exists=${path.join(tmp, '.env')}`];
+    } else if (opts.preloadType === 'env-file-if-exists-missing') {
+      execArgv = ['--env-file-if-exists', path.join(tmp, 'missing.env')];
+    } else if (opts.preloadType === 'env-file-if-exists-missing-equals') {
+      execArgv = [`--env-file-if-exists=${path.join(tmp, 'missing.env')}`];
+    } else if (opts.preloadType === 'env-file-if-exists-relative-existing') {
+      execArgv = ['--env-file-if-exists', '.env'];
+    } else if (opts.preloadType === 'env-file-if-exists-relative-missing') {
+      execArgv = ['--env-file-if-exists', 'missing.env'];
+    } else if (opts.preloadType === 'env-file-if-exists-mixed') {
+      execArgv = ['--env-file-if-exists', path.join(tmp, 'missing.env'), '--env-file-if-exists', path.join(tmp, '.env')];
+    } else if (opts.preloadType === 'env-file-if-exists-directory') {
+      const dirPath = path.join(tmp, 'testdir');
+      fs.mkdirSync(dirPath, { recursive: true });
+      execArgv = ['--env-file-if-exists', dirPath];
     } else if (opts.preloadType === 'require-nodeOptions') {
       env.NODE_OPTIONS = `--require ${dotenvConfigPath}`;
     } else if (opts.preloadType === 'import-nodeOptions') {
@@ -422,6 +436,119 @@ function assertPreloadRefusesTestSetters() {
     }
     
     pass(`${variant.label} omits test setters when .env sets NODE_ENV=test`);
+  }
+  
+  // Test --env-file-if-exists with missing files (should export setters)
+  const missingTests = [
+    { preloadType: 'env-file-if-exists-missing', label: '--env-file-if-exists <missing> (space-separated)' },
+    { preloadType: 'env-file-if-exists-missing-equals', label: '--env-file-if-exists=<missing> (equals form)' },
+  ];
+  
+  for (const test of missingTests) {
+    const result = probeSetterExportWithPreload('test', null, test);
+    if (result.error) {
+      failures.push(`${test.label}: ${result.error.message}`);
+    } else {
+      let report = null;
+      try {
+        report = JSON.parse(result.stdout || '');
+      } catch {
+        report = null;
+      }
+      if (!report || !Array.isArray(report.leaked)) {
+        failures.push(`${test.label}: child exited without a setter report`);
+      } else if (report.leaked.length === 0) {
+        failures.push(`${test.label}: setters were NOT exported (should export when file is missing)`);
+      } else {
+        pass(`${test.label} exports setters (file does not exist, no preload)`);
+      }
+    }
+  }
+  
+  // Test relative paths resolved against cwd
+  const relativeExistingResult = probeSetterExportWithPreload(undefined, dotenvTest, { preloadType: 'env-file-if-exists-relative-existing' });
+  if (relativeExistingResult.error) {
+    failures.push(`--env-file-if-exists .env (relative, existing): ${relativeExistingResult.error.message}`);
+  } else {
+    let relReport = null;
+    try {
+      relReport = JSON.parse(relativeExistingResult.stdout || '');
+    } catch {
+      relReport = null;
+    }
+    if (!relReport || !Array.isArray(relReport.leaked)) {
+      failures.push('--env-file-if-exists .env (relative, existing): child exited without a setter report');
+    } else if (relReport.leaked.length !== 0) {
+      failures.push(`--env-file-if-exists .env (relative, existing): setters still exported (${relReport.leaked.join(', ')}) when file exists`);
+    } else if (!relReport.preSentinel) {
+      failures.push('--env-file-if-exists .env (relative, existing): file was not loaded (sentinel missing)');
+    } else {
+      pass('--env-file-if-exists .env (relative, existing) refuses (file exists in cwd)');
+    }
+  }
+  
+  const relativeMissingResult = probeSetterExportWithPreload('test', null, { preloadType: 'env-file-if-exists-relative-missing' });
+  if (relativeMissingResult.error) {
+    failures.push(`--env-file-if-exists missing.env (relative, missing): ${relativeMissingResult.error.message}`);
+  } else {
+    let relMissReport = null;
+    try {
+      relMissReport = JSON.parse(relativeMissingResult.stdout || '');
+    } catch {
+      relMissReport = null;
+    }
+    if (!relMissReport || !Array.isArray(relMissReport.leaked)) {
+      failures.push('--env-file-if-exists missing.env (relative, missing): child exited without a setter report');
+    } else if (relMissReport.leaked.length === 0) {
+      failures.push('--env-file-if-exists missing.env (relative, missing): setters were NOT exported (should export when file is missing)');
+    } else {
+      pass('--env-file-if-exists missing.env (relative, missing) exports setters');
+    }
+  }
+  
+  // Test mixed: one missing + one existing (should refuse because one exists)
+  const mixedResult = probeSetterExportWithPreload(undefined, dotenvTest, { preloadType: 'env-file-if-exists-mixed' });
+  if (mixedResult.error) {
+    failures.push(`--env-file-if-exists mixed (missing + existing): ${mixedResult.error.message}`);
+  } else {
+    let mixedReport = null;
+    try {
+      mixedReport = JSON.parse(mixedResult.stdout || '');
+    } catch {
+      mixedReport = null;
+    }
+    if (!mixedReport || !Array.isArray(mixedReport.leaked)) {
+      failures.push('--env-file-if-exists mixed (missing + existing): child exited without a setter report');
+    } else if (mixedReport.leaked.length !== 0) {
+      failures.push(`--env-file-if-exists mixed (missing + existing): setters still exported (${mixedReport.leaked.join(', ')}) when one file exists`);
+    } else if (!mixedReport.preSentinel) {
+      failures.push('--env-file-if-exists mixed (missing + existing): existing file was not loaded (sentinel missing)');
+    } else {
+      pass('--env-file-if-exists mixed (missing + existing) refuses (one file exists)');
+    }
+  }
+  
+  // Test fail-closed: directory instead of file
+  const dirResult = probeSetterExportWithPreload(undefined, dotenvTest, { preloadType: 'env-file-if-exists-directory' });
+  // Node refuses to start when --env-file-if-exists points to a directory
+  if (dirResult.status !== 0 && dirResult.stderr && dirResult.stderr.includes('invalid format')) {
+    pass('--env-file-if-exists <directory> refused by Node (invalid format)');
+  } else if (dirResult.error) {
+    failures.push(`--env-file-if-exists <directory>: ${dirResult.error.message}`);
+  } else {
+    let dirReport = null;
+    try {
+      dirReport = JSON.parse(dirResult.stdout || '');
+    } catch {
+      dirReport = null;
+    }
+    if (!dirReport || !Array.isArray(dirReport.leaked)) {
+      failures.push(`--env-file-if-exists <directory>: child exited without a setter report (status=${dirResult.status}, stderr=${dirResult.stderr})`);
+    } else if (dirReport.leaked.length !== 0) {
+      failures.push(`--env-file-if-exists <directory>: setters still exported (${dirReport.leaked.join(', ')}) for directory (should fail-closed)`);
+    } else {
+      pass('--env-file-if-exists <directory> refuses (fail-closed: directory exists but is not a file)');
+    }
   }
 
   if (failures.length > 0) {
