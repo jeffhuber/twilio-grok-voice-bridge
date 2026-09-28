@@ -12,6 +12,7 @@ const nodeOptionsBeforeDotenv = process.env.NODE_OPTIONS;
 require('dotenv').config({ override: true });
 
 const crypto = require('crypto');
+const fs = require('fs');
 const http = require('http');
 const net = require('net');
 const express = require('express');
@@ -2522,40 +2523,64 @@ module.exports = {
 // Refuse export when dotenv was preloaded via -r/--require/--import dotenv/config
 // (relative or absolute path) or --env-file in process.execArgv or NODE_OPTIONS.
 function isDotenvPreloaded() {
-  function checkArg(arg) {
-    // --env-file* covers all forms: --env-file, --env-file=path, --env-file-if-exists, etc.
-    if (arg.startsWith('--env-file')) {
+  function fileExists(path) {
+    try {
+      fs.statSync(path);
+      return true;
+    } catch (err) {
+      if (err.code === 'ENOENT') return false;
       return true;
     }
+  }
+  function checkArg(arg, nextArg) {
+    // --env-file (plain) always refuses. Node throws ENOENT if the file is missing,
+    // so a process with --env-file=missing.env can't start.
+    if (arg === '--env-file' || arg.startsWith('--env-file=')) {
+      return true;
+    }
+    // --env-file-if-exists only refuses when the target file exists.
+    // Node loads nothing when the file is absent, so it's not a preload.
+    if (arg === '--env-file-if-exists') {
+      if (nextArg && fileExists(nextArg)) return true;
+    } else if (arg.startsWith('--env-file-if-exists=')) {
+      const path = arg.slice('--env-file-if-exists='.length);
+      if (path && fileExists(path)) return true;
+    }
     // -r, --require, --import with dotenv/config (relative or absolute path)
+    // Check both the arg itself (for combined forms) and nextArg (for space-separated forms)
     if (arg.includes('dotenv/config') || arg.includes('dotenv\\config')) {
       return true;
+    }
+    if ((arg === '-r' || arg === '--require' || arg === '--import') && nextArg) {
+      if (nextArg.includes('dotenv/config') || nextArg.includes('dotenv\\config')) {
+        return true;
+      }
     }
     return false;
   }
   if (Array.isArray(process.execArgv)) {
     for (let i = 0; i < process.execArgv.length; i++) {
       const arg = process.execArgv[i];
-      if (checkArg(arg)) return true;
-      // Early-exit optimization: check the next arg when this one is -r/--require/--import.
-      // Redundant (the loop will check it anyway), but avoids advancing when we know to refuse.
-      if (arg === '-r' || arg === '--require' || arg === '--import') {
-        const next = process.execArgv[i + 1];
-        if (next && checkArg(next)) return true;
+      const next = process.execArgv[i + 1];
+      if (checkArg(arg, next)) return true;
+      // When arg is a flag that takes a value in the next position, skip that value
+      // to avoid treating it as a separate flag. Without this, 'dotenv/config' after
+      // -r would match the dotenv/config check on the next iteration.
+      if (arg === '-r' || arg === '--require' || arg === '--import' || arg === '--env-file-if-exists') {
         i++;
       }
     }
   }
+  // Node rejects --env-file and --env-file-if-exists in NODE_OPTIONS
+  // ("--env-file= is not allowed in NODE_OPTIONS"), but we check anyway for defense in depth.
   const opts = nodeOptionsBeforeDotenv;
   if (typeof opts === 'string') {
     const tokens = opts.split(/\s+/);
     for (let i = 0; i < tokens.length; i++) {
       const token = tokens[i];
-      if (checkArg(token)) return true;
-      // Early-exit optimization: same as above for NODE_OPTIONS tokens
-      if (token === '-r' || token === '--require' || token === '--import') {
-        const next = tokens[i + 1];
-        if (next && checkArg(next)) return true;
+      const next = tokens[i + 1];
+      if (checkArg(token, next)) return true;
+      if (token === '-r' || token === '--require' || token === '--import' || token === '--env-file-if-exists') {
         i++;
       }
     }

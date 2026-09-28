@@ -297,6 +297,8 @@ function probeSetterExportWithPreload(nodeEnv, dotenvBody, options) {
       execArgv = ['--env-file-if-exists', path.join(tmp, '.env')];
     } else if (opts.preloadType === 'env-file-if-exists-equals') {
       execArgv = [`--env-file-if-exists=${path.join(tmp, '.env')}`];
+    } else if (opts.preloadType === 'env-file-if-exists-missing') {
+      execArgv = ['--env-file-if-exists', path.join(tmp, 'missing.env')];
     } else if (opts.preloadType === 'require-nodeOptions') {
       env.NODE_OPTIONS = `--require ${dotenvConfigPath}`;
     } else if (opts.preloadType === 'import-nodeOptions') {
@@ -422,6 +424,26 @@ function assertPreloadRefusesTestSetters() {
     }
     
     pass(`${variant.label} omits test setters when .env sets NODE_ENV=test`);
+  }
+  
+  // Test --env-file-if-exists with missing file (should export setters)
+  const missingFileResult = probeSetterExportWithPreload('test', null, { preloadType: 'env-file-if-exists-missing' });
+  if (missingFileResult.error) {
+    failures.push(`--env-file-if-exists with missing file: ${missingFileResult.error.message}`);
+  } else {
+    let missingReport = null;
+    try {
+      missingReport = JSON.parse(missingFileResult.stdout || '');
+    } catch {
+      missingReport = null;
+    }
+    if (!missingReport || !Array.isArray(missingReport.leaked)) {
+      failures.push('--env-file-if-exists with missing file: child exited without a setter report');
+    } else if (missingReport.leaked.length === 0) {
+      failures.push('--env-file-if-exists with missing file: setters were NOT exported (should export when file is missing)');
+    } else {
+      pass('--env-file-if-exists with missing file exports setters (file does not exist, no preload)');
+    }
   }
 
   if (failures.length > 0) {
