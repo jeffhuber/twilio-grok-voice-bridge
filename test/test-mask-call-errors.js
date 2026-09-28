@@ -275,6 +275,31 @@ function probeSetterExportWithPreload(nodeEnv, dotenvBody, options) {
     if (dotenvBody != null) {
       fs.writeFileSync(path.join(tmp, '.env'), dotenvBody, { mode: 0o600 });
     }
+    
+    // Special handling for chdir test (needs custom script)
+    if (opts.preloadType === 'env-file-if-exists-chdir') {
+      const script = [
+        'const origCwd = process.cwd();',
+        'process.chdir("/");',
+        '// Capture NODE_ENV and sentinel BEFORE require(server), so we see preload state before server dotenv.config',
+        'const preNodeEnv = Object.prototype.hasOwnProperty.call(process.env, "NODE_ENV") ? process.env.NODE_ENV : null;',
+        'const preSentinel = process.env.DOTENV_PRELOAD_SENTINEL || null;',
+        'const server = require(' + JSON.stringify(path.join(__dirname, '..', 'src', 'server.js')) + ');',
+        'const names = ["setTwilioClientForTests", "setGrokRealtimeUrlForTests"];',
+        'const leaked = names.filter((name) => typeof server[name] !== "undefined");',
+        'process.stdout.write(JSON.stringify({ leaked: leaked, preNodeEnv: preNodeEnv, preSentinel: preSentinel }));',
+        'process.exit(leaked.length ? 1 : 0);',
+      ].join('\n');
+      const execArgv = ['--env-file-if-exists', '.env'];
+      const result = spawnSync(process.execPath, [...execArgv, '-e', script], {
+        cwd: tmp,
+        env,
+        encoding: 'utf8',
+        timeout: 8000,
+      });
+      return result;
+    }
+    
     const dotenvConfigPath = require.resolve('dotenv/config');
     const script = [
       '// Capture NODE_ENV and sentinel BEFORE require(server), so we see preload state before server dotenv.config',
@@ -311,6 +336,12 @@ function probeSetterExportWithPreload(nodeEnv, dotenvBody, options) {
       const dirPath = path.join(tmp, 'testdir');
       fs.mkdirSync(dirPath, { recursive: true });
       execArgv = ['--env-file-if-exists', dirPath];
+    } else if (opts.preloadType === 'env-file-if-exists-enotdir') {
+      // Test ENOTDIR: path under a regular file
+      const regularFile = path.join(tmp, 'regular.txt');
+      fs.writeFileSync(regularFile, 'not a directory', { mode: 0o600 });
+      const pathUnderFile = path.join(regularFile, 'subpath', 'missing.env');
+      execArgv = ['--env-file-if-exists', pathUnderFile];
     } else if (opts.preloadType === 'require-nodeOptions') {
       env.NODE_OPTIONS = `--require ${dotenvConfigPath}`;
     } else if (opts.preloadType === 'import-nodeOptions') {
@@ -487,7 +518,7 @@ function assertPreloadRefusesTestSetters() {
     }
   }
   
-  const relativeMissingResult = probeSetterExportWithPreload('test', null, { preloadType: 'env-file-if-exists-relative-missing' });
+  const relativeMissingResult = probeSetterExportWithPreload(undefined, null, { preloadType: 'env-file-if-exists-relative-missing' });
   if (relativeMissingResult.error) {
     failures.push(`--env-file-if-exists missing.env (relative, missing): ${relativeMissingResult.error.message}`);
   } else {
@@ -499,10 +530,10 @@ function assertPreloadRefusesTestSetters() {
     }
     if (!relMissReport || !Array.isArray(relMissReport.leaked)) {
       failures.push('--env-file-if-exists missing.env (relative, missing): child exited without a setter report');
-    } else if (relMissReport.leaked.length === 0) {
-      failures.push('--env-file-if-exists missing.env (relative, missing): setters were NOT exported (should export when file is missing)');
+    } else if (relMissReport.leaked.length !== 0) {
+      failures.push(`--env-file-if-exists missing.env (relative, missing): setters still exported (${relMissReport.leaked.join(', ')}) when relative path is missing (cwd drift risk)`);
     } else {
-      pass('--env-file-if-exists missing.env (relative, missing) exports setters');
+      pass('--env-file-if-exists missing.env (relative, missing) refuses (cwd drift prevention)');
     }
   }
   
@@ -548,6 +579,46 @@ function assertPreloadRefusesTestSetters() {
       failures.push(`--env-file-if-exists <directory>: setters still exported (${dirReport.leaked.join(', ')}) for directory (should fail-closed)`);
     } else {
       pass('--env-file-if-exists <directory> refuses (fail-closed: directory exists but is not a file)');
+    }
+  }
+  
+  // Test cwd drift: relative path with chdir before require
+  const chdirResult = probeSetterExportWithPreload(undefined, dotenvTest, { preloadType: 'env-file-if-exists-chdir' });
+  if (chdirResult.error) {
+    failures.push(`--env-file-if-exists with chdir: ${chdirResult.error.message}`);
+  } else {
+    let chdirReport = null;
+    try {
+      chdirReport = JSON.parse(chdirResult.stdout || '');
+    } catch {
+      chdirReport = null;
+    }
+    if (!chdirReport || !Array.isArray(chdirReport.leaked)) {
+      failures.push('--env-file-if-exists with chdir: child exited without a setter report');
+    } else if (chdirReport.leaked.length !== 0) {
+      failures.push(`--env-file-if-exists with chdir: setters still exported (${chdirReport.leaked.join(', ')}) after chdir (cwd drift)`);
+    } else {
+      pass('--env-file-if-exists with chdir refuses (cwd drift prevented)');
+    }
+  }
+  
+  // Test fail-closed: ENOTDIR (path component is a file, not directory)
+  const enotdirResult = probeSetterExportWithPreload(undefined, dotenvTest, { preloadType: 'env-file-if-exists-enotdir' });
+  if (enotdirResult.error) {
+    failures.push(`--env-file-if-exists ENOTDIR: ${enotdirResult.error.message}`);
+  } else {
+    let enotdirReport = null;
+    try {
+      enotdirReport = JSON.parse(enotdirResult.stdout || '');
+    } catch {
+      enotdirReport = null;
+    }
+    if (!enotdirReport || !Array.isArray(enotdirReport.leaked)) {
+      failures.push('--env-file-if-exists ENOTDIR: child exited without a setter report');
+    } else if (enotdirReport.leaked.length !== 0) {
+      failures.push(`--env-file-if-exists ENOTDIR: setters still exported (${enotdirReport.leaked.join(', ')}) with ENOTDIR error (should fail-closed)`);
+    } else {
+      pass('--env-file-if-exists ENOTDIR refuses (fail-closed on non-ENOENT stat error)');
     }
   }
 
