@@ -21,8 +21,10 @@ Read README.md and docs/architecture.md in the repository before improvising.
 
 2. Configure env from .env.example:
    TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM_NUMBER, XAI_API_KEY,
-   optional XAI_VOICE, CONTACT_FULL_NAME, CONTACT_MOBILE, BARGE_IN_CONFIRM_MS,
-   SOFT_CONTINUE_MS, VOICE_ALIASES (JSON), STYLE_PACKS_DIR, STYLE_AUTO_SELECT.
+   optional XAI_VOICE, CONTACT_FULL_NAME, CONTACT_MOBILE, SUPPORT_ANNOUNCE_CONTACT_NAME,
+   BARGE_IN_CONFIRM_MS, SOFT_CONTINUE_MS, VOICE_ALIASES (JSON), STYLE_PACKS_DIR,
+   STYLE_AUTO_SELECT, ALLOW_PER_CALL_RECORDING, ALLOW_PER_CALL_DISCLOSURE_OFF.
+   Keep real style packs outside the repo (style-packs.local/ is gitignored).
    **CRITICAL:** Set BRIDGE_API_KEY for deployments to protect operator routes.
 
 3. Set PUBLIC_HOST to a hostname Twilio can reach over WSS.

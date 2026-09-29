@@ -5,3 +5,6 @@ node_modules/
 *.log
 .DS_Store
 npm-debug.log*
+
+# Local private style packs. Keep real packs outside the repo.
+style-packs.local/

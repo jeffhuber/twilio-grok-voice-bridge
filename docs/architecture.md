@@ -91,12 +91,12 @@ The effective value is the JSON boolean on `/call` when one is sent. Otherwise i
 
 | Style | Coaching |
 |-------|----------|
-| `support` (default) | Generic errand/CS pacing. When `CONTACT_FULL_NAME` is set, the first line says the call is on behalf of that name. |
+| `support` (default) | Generic errand/CS pacing. The contact name is announced only when `SUPPORT_ANNOUNCE_CONTACT_NAME` is exactly `1`. |
 | `restaurant-book` | Sample reservation coaching using `CONTACT_FULL_NAME` / `CONTACT_MOBILE` |
 | `custom` | Goal + context only. Also the fallback for a style name that is still unknown. |
 | private pack | Loaded from `STYLE_PACKS_DIR`. See templates/styles.md. |
 
-`STYLE_AUTO_SELECT` maps a destination number to a style when `POST /call` omits `style`. After whitespace is stripped, the key must be E.164 (`+` and 2 to 15 digits). An explicit `style` wins. `GET /health` is unauthenticated: `styles` lists only `support`, `restaurant-book`, and `custom`, and `stylePackCount` is the number of loaded packs. Pack names, aliases, and destination numbers are not included. `styleAutoSelectCount` is the number of kept map entries.
+`STYLE_AUTO_SELECT` maps a destination number to a style when `POST /call` omits `style`. After whitespace is stripped, the key must be E.164 (`+` and 2 to 15 digits). An explicit `style` wins. `GET /health` is unauthenticated: `styles` lists only `support`, `restaurant-book`, and `custom`, and `stylePackCount` is the number of loaded packs. Pack names, aliases, and destination numbers are not included. `styleAutoSelectCount` is the number of kept map entries. A style-pack symlink is loaded only when the resolved file is inside the pack directory. Pack text is sent to xAI as call instructions and is not written to logs.
 
 ## Voice resolution
 

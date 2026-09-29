@@ -510,37 +510,52 @@ function commitStylePack(pack) {
 }
 
 function stylePackFileLabel(fileName) {
-  return maskPhoneNumbersInText(fileName);
+  return maskPhoneNumbersInText(path.basename(String(fileName || '')));
+}
+
+function isStylePackCandidate(entry) {
+  return entry.name.endsWith('.json') && (entry.isFile() || entry.isSymbolicLink());
 }
 
 /**
- * Top-level *.json entries. A symlink is loaded only when statSync, which
- * follows the link, reports a regular file. Directory links are not walked.
+ * True when candidateReal is rootReal or a path under it.
+ * A sibling such as /packs-evil is not under /packs.
  */
-function stylePackEntryIsLoadable(dir, entry) {
-  if (!entry.name.endsWith('.json')) return false;
-  if (entry.isFile()) return true;
-  if (!entry.isSymbolicLink()) return false;
-  const label = stylePackFileLabel(entry.name);
-  let st;
-  try {
-    st = fs.statSync(path.join(dir, entry.name));
-  } catch (err) {
-    console.warn(`[warn] style pack skipped file=${label} reason=unreadable`);
-    return false;
-  }
-  if (!st.isFile()) {
-    console.warn(`[warn] style pack skipped file=${label} reason=not a regular file`);
-    return false;
-  }
+function pathIsInside(rootReal, candidateReal) {
+  const rel = path.relative(rootReal, candidateReal);
+  if (rel === '') return true;
+  if (rel === '..' || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel)) return false;
   return true;
 }
 
-function readStylePackFile(dir, fileName) {
+function readStylePackFile(dirReal, fileName) {
   const label = stylePackFileLabel(fileName);
+  const full = path.join(dirReal, fileName);
+  let targetReal;
+  try {
+    targetReal = fs.realpathSync(full);
+  } catch (err) {
+    console.warn(`[warn] style pack skipped file=${label} reason=unreadable`);
+    return;
+  }
+  if (!pathIsInside(dirReal, targetReal)) {
+    console.warn(`[warn] style pack skipped file=${label} reason=symlink escapes the pack directory`);
+    return;
+  }
+  let st;
+  try {
+    st = fs.statSync(targetReal);
+  } catch (err) {
+    console.warn(`[warn] style pack skipped file=${label} reason=unreadable`);
+    return;
+  }
+  if (!st.isFile()) {
+    console.warn(`[warn] style pack skipped file=${label} reason=not a regular file`);
+    return;
+  }
   let raw;
   try {
-    raw = fs.readFileSync(path.join(dir, fileName), 'utf8');
+    raw = fs.readFileSync(targetReal, 'utf8');
   } catch (err) {
     console.warn(`[warn] style pack skipped file=${label} reason=unreadable`);
     return;
@@ -574,26 +589,33 @@ function loadStylePacks(dirRaw) {
   const dir = String(dirRaw == null ? '' : dirRaw).trim();
   if (!dir) return;
   if (!path.isAbsolute(dir)) {
-    console.warn(
-      `[warn] STYLE_PACKS_DIR must be an absolute path; ignoring (${maskPhoneNumbersInText(dir)})`
-    );
+    console.warn('[warn] STYLE_PACKS_DIR must be an absolute path; ignoring');
+    return;
+  }
+  let dirReal;
+  try {
+    dirReal = fs.realpathSync(dir);
+    if (!fs.statSync(dirReal).isDirectory()) {
+      console.warn('[warn] STYLE_PACKS_DIR is missing or unreadable');
+      return;
+    }
+  } catch (err) {
+    console.warn('[warn] STYLE_PACKS_DIR is missing or unreadable');
     return;
   }
   let names;
   try {
     names = fs
-      .readdirSync(dir, { withFileTypes: true })
-      .filter((entry) => stylePackEntryIsLoadable(dir, entry))
+      .readdirSync(dirReal, { withFileTypes: true })
+      .filter(isStylePackCandidate)
       .map((entry) => entry.name)
       .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
   } catch (err) {
-    console.warn(
-      `[warn] STYLE_PACKS_DIR is missing or unreadable (${maskPhoneNumbersInText(dir)})`
-    );
+    console.warn('[warn] STYLE_PACKS_DIR is missing or unreadable');
     return;
   }
   for (const fileName of names) {
-    readStylePackFile(dir, fileName);
+    readStylePackFile(dirReal, fileName);
   }
 }
 
@@ -1043,7 +1065,8 @@ const GENERIC_SOFT_CONTINUE_PROMPT =
   '[bridge-continue] The other party is still on the line and quiet. Speak now: next 1–2 new sentences (or finish). Do not wait. Do not repeat yourself. If the call is done, say goodbye and include [[HANGUP_REQUESTED]].';
 
 function supportRoleLine() {
-  const fullName = (process.env.CONTACT_FULL_NAME || '').trim();
+  const announce = process.env.SUPPORT_ANNOUNCE_CONTACT_NAME === '1';
+  const fullName = announce ? (process.env.CONTACT_FULL_NAME || '').trim() : '';
   if (!fullName) {
     return 'You are placing a phone call to handle an errand or customer-support matter.';
   }
@@ -2218,6 +2241,12 @@ app.post('/call', requireBridgeAuth, async (req, res) => {
     if (record !== undefined && typeof record !== 'boolean') {
       return res.status(400).json({ error: 'record must be a boolean when provided' });
     }
+    if (discloseAi === false && process.env.ALLOW_PER_CALL_DISCLOSURE_OFF !== '1') {
+      return res.status(403).json({ error: 'discloseAi false requires ALLOW_PER_CALL_DISCLOSURE_OFF=1' });
+    }
+    if (record === true && process.env.ALLOW_PER_CALL_RECORDING !== '1') {
+      return res.status(403).json({ error: 'record true requires ALLOW_PER_CALL_RECORDING=1' });
+    }
     if (!isE164(to)) {
       return res.status(400).json({ error: 'to must be an E.164 number' });
     }
@@ -2276,6 +2305,12 @@ app.post('/call', requireBridgeAuth, async (req, res) => {
 
     const redactedTwimlUrl = `https://${PUBLIC_HOST}/twiml-connect?sessionId=${tempId.slice(0, 8)}...`;
     console.log(`[call] placed sid=${callSid} to=${maskPhoneNumber(to)} style=${resolvedStyle} twimlUrl=${redactedTwimlUrl}`);
+    if (discloseAi === false) {
+      console.log(`[call] disclosure=off callSid=${callSid}`);
+    }
+    if (record === true) {
+      console.log(`[call] recording=on callSid=${callSid}`);
+    }
     res.json({
       ok: true,
       callSid: call.sid,

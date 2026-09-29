@@ -7,7 +7,10 @@ const os = require('os');
 const path = require('path');
 const { spawnSync } = require('child_process');
 
-const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'style-packs-'));
+const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'style-packs-root-'));
+const tmp = path.join(scratch, 'packs');
+const outsideDir = path.join(scratch, 'outside-not-in-packs');
+fs.mkdirSync(tmp);
 const serverPath = path.join(__dirname, '..', 'src', 'server.js');
 
 const MAPPED = '+15555550100';
@@ -31,6 +34,7 @@ const CANARIES = [
   'CANARY_NESTED',
   'CANARY_EXTRA_KEY',
   'CANARY_LINKED',
+  'CANARY_ESCAPED',
 ];
 
 const GENERIC_NUDGE =
@@ -143,21 +147,31 @@ function installFixtures() {
     role: 'CANARY_ALIAS_DUP should not load',
     aliases: ['warm'],
   });
-  const outside = path.join(tmp, 'outside');
-  fs.mkdirSync(outside);
+  const targets = path.join(tmp, 'targets');
+  fs.mkdirSync(targets);
   fs.writeFileSync(
-    path.join(outside, 'pack.json'),
+    path.join(targets, 'inside.json'),
     `${JSON.stringify({
       name: 'linked-style',
-      description: 'Loaded through a symlink',
+      description: 'Loaded through a symlink inside the pack directory',
       aliases: ['linked'],
       role: 'You are placing a linked phone call.',
       extraNote: 'CANARY_LINKED',
       softContinue: false,
     })}\n`
   );
-  fs.symlinkSync(path.join(outside, 'pack.json'), path.join(tmp, '70-linked.json'));
-  fs.symlinkSync(outside, path.join(tmp, '80-dir-link.json'));
+  fs.symlinkSync(path.join(targets, 'inside.json'), path.join(tmp, '70-linked.json'));
+  fs.symlinkSync(targets, path.join(tmp, '80-dir-link.json'));
+  fs.mkdirSync(outsideDir);
+  fs.writeFileSync(
+    path.join(outsideDir, 'pack.json'),
+    `${JSON.stringify({
+      name: 'escaped-style',
+      aliases: ['escaped'],
+      role: 'CANARY_ESCAPED should not load',
+    })}\n`
+  );
+  fs.symlinkSync(path.join(outsideDir, 'pack.json'), path.join(tmp, '71-escape.json'));
   fs.symlinkSync(path.join(tmp, 'missing-target.json'), path.join(tmp, '90-broken.json'));
   fs.writeFileSync(path.join(tmp, 'notes.txt'), 'CANARY_NOTES +15555550166\n');
   fs.mkdirSync(path.join(tmp, 'nested'));
@@ -288,6 +302,9 @@ async function main() {
     'SKIP_AI_DISCLOSURE',
     'CONTACT_FULL_NAME',
     'CONTACT_MOBILE',
+    'SUPPORT_ANNOUNCE_CONTACT_NAME',
+    'ALLOW_PER_CALL_DISCLOSURE_OFF',
+    'ALLOW_PER_CALL_RECORDING',
     'VAD_THRESHOLD',
     'VAD_SILENCE_MS',
     'VAD_SOFT_THRESHOLD',
@@ -361,7 +378,15 @@ async function main() {
   assert(!skipLines.some((line) => line.includes('10-warm-personal.json')), 'the valid pack is not skipped');
   assert(!skipLines.some((line) => line.includes('15-token-close.json')), 'the token closing pack is not skipped');
   assert(!skipLines.some((line) => line.includes('16-generic-close.json')), 'a pack with no closing is not skipped');
-  assert(!skipLines.some((line) => line.includes('70-linked.json')), 'a symlink to a regular pack file is not skipped');
+  assert(!skipLines.some((line) => line.includes('70-linked.json')), 'a symlink to a regular file inside the pack directory is not skipped');
+  assert(
+    skipLines.some((line) => line.includes('71-escape.json') && line.includes('reason=symlink escapes the pack directory')),
+    'a symlink to a file outside the pack directory is skipped'
+  );
+  assert(
+    !captured.some((line) => line.includes(outsideDir) || line.includes('outside-not-in-packs') || line.includes(scratch)),
+    'pack-directory logs do not include the outside path or the scratch path'
+  );
   assert(
     skipLines.some((line) => line.includes('80-dir-link.json') && line.includes('reason=not a regular file')),
     'a symlink to a directory is not loaded as a pack'
@@ -405,7 +430,7 @@ async function main() {
       'unauthenticated /health styles lists only the built-ins'
     );
     assert(health.json.stylePackCount === PACK_COUNT, 'stylePackCount counts loaded packs');
-    for (const secret of ['warm-personal', 'warm', 'token-close', 'generic-close', 'linked-style', 'linked']) {
+    for (const secret of ['warm-personal', 'warm', 'token-close', 'generic-close', 'linked-style', 'linked', 'escaped-style', 'escaped']) {
       assert(!health.text.includes(secret), `unauthenticated /health does not include ${secret}`);
     }
     assert(health.json.styleAutoSelectCount === 2, 'styleAutoSelectCount counts only kept entries');
@@ -425,8 +450,15 @@ async function main() {
       goal: 'Confirm a dinner time',
       style: 'linked',
     });
-    assert(linked.style === 'linked-style', 'a symlinked pack file loads and its alias resolves');
+    assert(linked.style === 'linked-style', 'a symlink to a file inside the pack directory loads and its alias resolves');
     assert(!linked.instructions.includes('CANARY_LINKED'), 'a symlinked pack ignores unknown keys');
+    const escaped = createSession({
+      callSid: 'shape-escaped',
+      goal: 'Confirm a dinner time',
+      style: 'escaped',
+    });
+    assert(escaped.style === 'custom', 'a symlink that leaves the pack directory does not load a style');
+    assert(!escaped.instructions.includes('CANARY_ESCAPED'), 'an escaped pack is not sent to the model');
     assert(shaped.softContinue === true, 'omitted softContinue uses the pack default');
     assert(shaped.vadThreshold === 0.72 && shaped.vadSilenceMs === 350, 'pack softContinue selects soft VAD');
     assert(!shaped.instructions.includes('CANARY_EXTRA_KEY'), 'unknown pack keys are not copied into instructions');
@@ -587,6 +619,83 @@ async function main() {
       'POST /call softContinue false overrides the pack default'
     );
 
+    delete process.env.ALLOW_PER_CALL_DISCLOSURE_OFF;
+    delete process.env.ALLOW_PER_CALL_RECORDING;
+    const refusedDisclosureBefore = calls.length;
+    const refusedDisclosure = await request(port, 'POST', '/call', {
+      to: UNMAPPED,
+      goal: 'Confirm a dinner time',
+      discloseAi: false,
+    });
+    assert(
+      refusedDisclosure.status === 403 &&
+        refusedDisclosure.json &&
+        refusedDisclosure.json.error === 'discloseAi false requires ALLOW_PER_CALL_DISCLOSURE_OFF=1' &&
+        calls.length === refusedDisclosureBefore,
+      'discloseAi false is 403 and does not place a call when the allow flag is off'
+    );
+    const refusedRecordBefore = calls.length;
+    const refusedRecord = await request(port, 'POST', '/call', {
+      to: UNMAPPED,
+      goal: 'Confirm a dinner time',
+      record: true,
+    });
+    assert(
+      refusedRecord.status === 403 &&
+        refusedRecord.json &&
+        refusedRecord.json.error === 'record true requires ALLOW_PER_CALL_RECORDING=1' &&
+        calls.length === refusedRecordBefore,
+      'record true is 403 and does not place a call when the allow flag is off'
+    );
+    process.env.ALLOW_PER_CALL_RECORDING = 'true';
+    const wordyRecordBefore = calls.length;
+    const wordyRecord = await request(port, 'POST', '/call', {
+      to: UNMAPPED,
+      goal: 'Confirm a dinner time',
+      record: true,
+    });
+    assert(
+      wordyRecord.status === 403 && calls.length === wordyRecordBefore,
+      'ALLOW_PER_CALL_RECORDING=true does not enable per-call recording'
+    );
+    delete process.env.ALLOW_PER_CALL_RECORDING;
+
+    process.env.ALLOW_PER_CALL_DISCLOSURE_OFF = '1';
+    process.env.ALLOW_PER_CALL_RECORDING = '1';
+    const unauthBefore = calls.length;
+    const unauth = await request(
+      port,
+      'POST',
+      '/call',
+      { to: UNMAPPED, goal: 'Confirm a dinner time', record: true, discloseAi: false },
+      { auth: false }
+    );
+    assert(
+      unauth.status === 401 &&
+        unauth.json &&
+        unauth.json.error === 'unauthorized' &&
+        calls.length === unauthBefore,
+      'unauthenticated POST /call with record true and discloseAi false is 401 and does not call Twilio'
+    );
+
+    const overrideLogStart = captured.length;
+    const honored = await place({
+      to: UNMAPPED,
+      goal: 'Confirm a dinner time',
+      discloseAi: false,
+      record: true,
+    });
+    const honoredSid = honored.result.json && honored.result.json.callSid;
+    const honoredLogs = captured.slice(overrideLogStart);
+    const disclosureLog = honoredLogs.find((line) => line.includes('disclosure=off'));
+    const recordingLog = honoredLogs.find((line) => line.includes('recording=on'));
+    assert(
+      honored.result.status === 200 &&
+        disclosureLog === `[call] disclosure=off callSid=${honoredSid}` &&
+        recordingLog === `[call] recording=on callSid=${honoredSid}`,
+      'honored overrides log disclosure=off and recording=on with the call SID and no phone number'
+    );
+
     const disclosureCases = [
       { skip: undefined, discloseAi: undefined, effective: true, inText: true, label: 'default disclosure on' },
       { skip: undefined, discloseAi: false, effective: false, inText: false, label: 'discloseAi false omits the block' },
@@ -638,6 +747,7 @@ async function main() {
       }
     }
     delete process.env.SKIP_AI_DISCLOSURE;
+    delete process.env.ALLOW_PER_CALL_DISCLOSURE_OFF;
 
     async function assertRecord(body, expected, label) {
       const before = calls.length;
@@ -657,6 +767,7 @@ async function main() {
     }
 
     delete process.env.ENABLE_RECORDING;
+    process.env.ALLOW_PER_CALL_RECORDING = '1';
     await assertRecord({ to: UNMAPPED, goal: 'Confirm a dinner time' }, false, 'record omitted stays off by default');
     await assertRecord({ to: UNMAPPED, goal: 'Confirm a dinner time', record: true }, true, 'record true requests dual-channel recording when the global flag is off');
     await assertRecord({ to: UNMAPPED, goal: 'Confirm a dinner time', record: false }, false, 'record false stays off when the global flag is off');
@@ -688,6 +799,7 @@ async function main() {
       }
     }
     delete process.env.ENABLE_RECORDING;
+    delete process.env.ALLOW_PER_CALL_RECORDING;
 
     process.env.SKIP_AI_DISCLOSURE = '1';
     const steeredOn = createSession({
@@ -754,6 +866,28 @@ async function main() {
     );
 
     process.env.CONTACT_FULL_NAME = 'Example Person';
+    delete process.env.SUPPORT_ANNOUNCE_CONTACT_NAME;
+    const supportHidden = createSession({
+      callSid: 'support-hidden',
+      goal: 'Check a store hour',
+      style: 'support',
+    });
+    assert(
+      supportHidden.instructions.split('\n')[0] ===
+        'You are placing a phone call to handle an errand or customer-support matter.' &&
+        !supportHidden.instructions.includes('Example Person'),
+      'CONTACT_FULL_NAME does not change support calls unless the support announcement is enabled'
+    );
+    const restaurantNamed = createSession({
+      callSid: 'restaurant-named',
+      goal: 'Book a table',
+      style: 'restaurant-book',
+    });
+    assert(
+      restaurantNamed.instructions.includes('Example Person'),
+      'restaurant-book still uses CONTACT_FULL_NAME when the support announcement is off'
+    );
+    process.env.SUPPORT_ANNOUNCE_CONTACT_NAME = '1';
     const supportNamed = createSession({
       callSid: 'support-named',
       goal: 'Check a store hour',
@@ -762,9 +896,20 @@ async function main() {
     assert(
       supportNamed.instructions.split('\n')[0] ===
         'You are placing a phone call on behalf of Example Person to handle an errand or customer-support matter.',
-      'support first line names CONTACT_FULL_NAME when it is set'
+      'support first line names CONTACT_FULL_NAME when SUPPORT_ANNOUNCE_CONTACT_NAME is exactly 1'
+    );
+    process.env.SUPPORT_ANNOUNCE_CONTACT_NAME = 'true';
+    const supportWord = createSession({
+      callSid: 'support-word',
+      goal: 'Check a store hour',
+      style: 'support',
+    });
+    assert(
+      !supportWord.instructions.includes('Example Person'),
+      'SUPPORT_ANNOUNCE_CONTACT_NAME=true does not announce the contact name'
     );
     delete process.env.CONTACT_FULL_NAME;
+    delete process.env.SUPPORT_ANNOUNCE_CONTACT_NAME;
 
     const quiet = createSession({
       callSid: 'nudge-quiet',
@@ -905,7 +1050,7 @@ async function main() {
   const leakedCanaries = captured.filter((line) => CANARIES.some((needle) => line.includes(needle)));
   assert(leakedCanaries.length === 0, 'server logs do not contain style pack file contents');
 
-  fs.rmSync(tmp, { recursive: true, force: true });
+  fs.rmSync(scratch, { recursive: true, force: true });
   if (failed > 0) {
     orig.error(`\n${failed} style pack test(s) failed`);
     process.exit(1);

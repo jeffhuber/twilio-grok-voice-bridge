@@ -8,8 +8,9 @@ Built-in styles are `support` (default), `restaurant-book`, and `custom`. Privat
 
 Professional errand / customer-support pacing.
 
-- When `CONTACT_FULL_NAME` is set, the first instruction line is: `You are placing a phone call on behalf of <CONTACT_FULL_NAME> to handle an errand or customer-support matter.`
-- When `CONTACT_FULL_NAME` is unset, the first line stays: `You are placing a phone call to handle an errand or customer-support matter.`
+- The first line stays `You are placing a phone call to handle an errand or customer-support matter.` unless `SUPPORT_ANNOUNCE_CONTACT_NAME` is exactly `1`.
+- When that flag is exactly `1` and `CONTACT_FULL_NAME` is set, the first line is: `You are placing a phone call on behalf of <CONTACT_FULL_NAME> to handle an errand or customer-support matter.`
+- `CONTACT_FULL_NAME` used for restaurant booking does not change support calls while the flag is off.
 - Wait through IVR and hold; do not babble over hold music.
 - Concise, clear, lightly energetic delivery.
 - Soft-continue off unless you set `softContinue: true`.
@@ -39,7 +40,7 @@ An unknown `style` still resolves to `custom`.
 
 ## Private style packs (`STYLE_PACKS_DIR`)
 
-`STYLE_PACKS_DIR` is an optional absolute path. At startup the server reads every top-level `*.json` name in that directory, sorted by filename. It does not walk subdirectories. A symlink is followed with `statSync` and loaded only when the target is a regular file. A symlink to a directory is not walked. A broken symlink is skipped.
+`STYLE_PACKS_DIR` is an optional absolute path outside this repo. A gitignored `style-packs.local/` directory is one place for real packs. At startup the server reads every top-level `*.json` name in that directory, sorted by filename. It does not walk subdirectories. A symlink is loaded only when its resolved target is a regular file inside the pack directory. A symlink that resolves outside the directory is skipped. The log names the file and says the symlink escapes the pack directory. It does not include the target path. A symlink to a directory is not walked. A broken symlink is skipped. Pack text is not written to logs. It is sent to xAI as the model instructions for a call that uses the pack.
 
 `GET /health` is unauthenticated. `styles` lists only `support`, `restaurant-book`, and `custom`. Pack names and aliases are omitted. `stylePackCount` is the number of packs that loaded.
 

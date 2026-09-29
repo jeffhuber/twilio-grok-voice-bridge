@@ -27,13 +27,13 @@ Authorization: Bearer <BRIDGE_API_KEY>
 
 `style` is optional. Omit it (or send null or "") to let `STYLE_AUTO_SELECT` choose from the destination. An explicit style wins. An unknown explicit style still falls through to `custom`.
 
-`discloseAi` is an optional boolean. `true` includes the AI disclosure block for this call even when `SKIP_AI_DISCLOSURE` is exactly `1`. `false` omits it even when disclosure is on by default. The effective boolean is returned as `discloseAi` and stored on the session, so `/steer` rebuilds keep it. Any other JSON type is 400:
+`discloseAi` is an optional boolean. `true` includes the AI disclosure block for this call even when `SKIP_AI_DISCLOSURE` is exactly `1`. `false` omits it only when `ALLOW_PER_CALL_DISCLOSURE_OFF` is exactly `1`. Otherwise the response is 403 and no call is placed. The operator is responsible for leaving the disclosure out. This software does not decide that omitting it is lawful. Some states require all parties to consent before a private call is recorded, including California Penal Code 632 and Washington RCW 9.73.030. In February 2024 the FCC ruled that AI-generated voices are artificial voices under the TCPA. California's bot-disclosure law, Business and Professions Code sections 17940 through 17943, can require a bot to disclose that it is a bot when it communicates with a person in California to encourage a sale or to influence a vote. The effective boolean is returned as `discloseAi` and stored on the session, so `/steer` rebuilds keep it. When `discloseAi: false` is honored, the bridge logs `disclosure=off` with the call SID and no phone number. Any other JSON type is 400:
 
 ```json
 { "error": "discloseAi must be a boolean when provided" }
 ```
 
-`record` is an optional boolean. `true` asks Twilio for dual-channel recording on this call even when `ENABLE_RECORDING` is off. `false` records nothing even when `ENABLE_RECORDING` is exactly `1`. The global default stays off. Recording can require consent from the people on the call. Review the consent laws that apply before setting `record` to true. The effective boolean is returned as `record`. Any other JSON type is 400:
+`record` is an optional boolean. `true` asks Twilio for dual-channel recording on this call only when `ALLOW_PER_CALL_RECORDING` is exactly `1`, even if `ENABLE_RECORDING` is off. Otherwise the response is 403 and no call is placed. `false` records nothing even when `ENABLE_RECORDING` is exactly `1`. The global default stays off. The operator is responsible for recording. All-party consent rules include California Penal Code 632 and Washington RCW 9.73.030. Other states have their own rules. In February 2024 the FCC ruled that AI-generated voices are artificial voices under the TCPA. When recording is on, Twilio stores the audio in the Twilio account that placed the call. Anyone who can sign in to that account's Console, and any API client with the account credentials, can open the recording and its media URL. The recording stays there until someone deletes it in the Console or with the Twilio Recordings API. This bridge does not delete it. When `record: true` is honored, the bridge logs `recording=on` with the call SID and no phone number. The effective boolean is returned as `record`. Any other JSON type is 400:
 
 ```json
 { "error": "record must be a boolean when provided" }
@@ -60,7 +60,7 @@ Private styles are JSON files in `STYLE_PACKS_DIR`, not fields on `/call`. `temp
 }
 ```
 
-`name` must match `^[a-z0-9][a-z0-9-]{0,39}$`. `role` is required. `coaching` and `closing` are a string or an array of strings. Unknown keys are ignored. A closing or `softContinuePrompt` that does not contain `[[HANGUP_REQUESTED]]` gets the generic hangup-token lines appended. Pack contents are never written to logs. Unauthenticated `GET /health` does not list pack names or aliases. It reports `stylePackCount`. A symlink in `STYLE_PACKS_DIR` is loaded only when it points at a regular file.
+`name` must match `^[a-z0-9][a-z0-9-]{0,39}$`. `role` is required. `coaching` and `closing` are a string or an array of strings. Unknown keys are ignored. A closing or `softContinuePrompt` that does not contain `[[HANGUP_REQUESTED]]` gets the generic hangup-token lines appended. Pack contents are not written to logs. They are sent to xAI as the model instructions for a call that uses the pack. Keep real packs outside the repo, for example in a gitignored `style-packs.local/` directory. Unauthenticated `GET /health` does not list pack names or aliases. It reports `stylePackCount`. A symlink is loaded only when the resolved target is a regular file inside `STYLE_PACKS_DIR`. A symlink that points outside that directory is skipped.
 
 
 ## POST /steer

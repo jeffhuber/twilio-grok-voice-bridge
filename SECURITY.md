@@ -88,8 +88,8 @@ Use `.env` (gitignored) or secret management systems for deployments.
 - [ ] Ensure `ALLOW_UNAUTHENTICATED_OPERATOR` is NOT set (fail-closed by default; only use `=1` for localhost demos)
 - [ ] Enable HTTPS/WSS (Twilio Media Streams require WSS)
 - [ ] Configure `SESSION_MAX_AGE_MS` for your use case (default 2 hours)
-- [ ] Review AI disclosure requirements for your jurisdiction
-- [ ] Enable recording only if required (`ENABLE_RECORDING=1`, or per-call `record: true`) and comply with consent laws
+- [ ] Review AI disclosure requirements for your jurisdiction. `discloseAi: false` is refused unless `ALLOW_PER_CALL_DISCLOSURE_OFF` is exactly `1`. The operator is responsible for leaving disclosure out. This software does not decide that the omission is lawful. California's bot-disclosure law (Business and Professions Code sections 17940 through 17943) can require a bot to disclose that it is a bot. In February 2024 the FCC ruled that AI-generated voices are artificial voices under the TCPA.
+- [ ] Enable recording only if required (`ENABLE_RECORDING=1`, or per-call `record: true` when `ALLOW_PER_CALL_RECORDING` is exactly `1`). The operator is responsible. All-party consent rules include California Penal Code 632 and Washington RCW 9.73.030. Recordings stay in the Twilio account until someone deletes them. Console users of that account, and API clients with the account credentials, can access the recording and its media URL.
 - [ ] Keep `LOG_TRANSCRIPTS` disabled (default) unless actively debugging
 - [ ] Use Cloudflare Access, VPN, or IP allowlists for additional access control
 - [ ] Configure Twilio billing alerts and rate limits in Twilio Console
