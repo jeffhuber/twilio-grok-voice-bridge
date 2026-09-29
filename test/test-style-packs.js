@@ -35,6 +35,7 @@ const CANARIES = [
   'CANARY_EXTRA_KEY',
   'CANARY_LINKED',
   'CANARY_ESCAPED',
+  'CANARY_HARD',
 ];
 
 const GENERIC_NUDGE =
@@ -172,6 +173,14 @@ function installFixtures() {
     })}\n`
   );
   fs.symlinkSync(path.join(outsideDir, 'pack.json'), path.join(tmp, '71-escape.json'));
+  fs.writeFileSync(
+    path.join(outsideDir, 'hard.json'),
+    `${JSON.stringify({
+      name: 'hard-style',
+      role: 'CANARY_HARD should not load',
+    })}\n`
+  );
+  fs.linkSync(path.join(outsideDir, 'hard.json'), path.join(tmp, '72-hard.json'));
   fs.symlinkSync(path.join(tmp, 'missing-target.json'), path.join(tmp, '90-broken.json'));
   fs.writeFileSync(path.join(tmp, 'notes.txt'), 'CANARY_NOTES +15555550166\n');
   fs.mkdirSync(path.join(tmp, 'nested'));
@@ -384,6 +393,10 @@ async function main() {
     'a symlink to a file outside the pack directory is skipped'
   );
   assert(
+    skipLines.some((line) => line.includes('72-hard.json') && line.includes('reason=hard link')),
+    'a hard link is skipped'
+  );
+  assert(
     !captured.some((line) => line.includes(outsideDir) || line.includes('outside-not-in-packs') || line.includes(scratch)),
     'pack-directory logs do not include the outside path or the scratch path'
   );
@@ -430,7 +443,7 @@ async function main() {
       'unauthenticated /health styles lists only the built-ins'
     );
     assert(health.json.stylePackCount === PACK_COUNT, 'stylePackCount counts loaded packs');
-    for (const secret of ['warm-personal', 'warm', 'token-close', 'generic-close', 'linked-style', 'linked', 'escaped-style', 'escaped']) {
+    for (const secret of ['warm-personal', 'warm', 'token-close', 'generic-close', 'linked-style', 'linked', 'escaped-style', 'escaped', 'hard-style']) {
       assert(!health.text.includes(secret), `unauthenticated /health does not include ${secret}`);
     }
     assert(health.json.styleAutoSelectCount === 2, 'styleAutoSelectCount counts only kept entries');
@@ -459,6 +472,13 @@ async function main() {
     });
     assert(escaped.style === 'custom', 'a symlink that leaves the pack directory does not load a style');
     assert(!escaped.instructions.includes('CANARY_ESCAPED'), 'an escaped pack is not sent to the model');
+    const hardLinked = createSession({
+      callSid: 'shape-hard',
+      goal: 'Confirm a dinner time',
+      style: 'hard-style',
+    });
+    assert(hardLinked.style === 'custom', 'a hard link is not loaded as a style');
+    assert(!hardLinked.instructions.includes('CANARY_HARD'), 'a hard-linked pack is not sent to the model');
     assert(shaped.softContinue === true, 'omitted softContinue uses the pack default');
     assert(shaped.vadThreshold === 0.72 && shaped.vadSilenceMs === 350, 'pack softContinue selects soft VAD');
     assert(!shaped.instructions.includes('CANARY_EXTRA_KEY'), 'unknown pack keys are not copied into instructions');
@@ -634,6 +654,23 @@ async function main() {
         calls.length === refusedDisclosureBefore,
       'discloseAi false is 403 and does not place a call when the allow flag is off'
     );
+    for (const value of ['true', 'yes', ' 1']) {
+      process.env.ALLOW_PER_CALL_DISCLOSURE_OFF = value;
+      const before = calls.length;
+      const result = await request(port, 'POST', '/call', {
+        to: UNMAPPED,
+        goal: 'Confirm a dinner time',
+        discloseAi: false,
+      });
+      assert(
+        result.status === 403 &&
+          result.json &&
+          result.json.error === 'discloseAi false requires ALLOW_PER_CALL_DISCLOSURE_OFF=1' &&
+          calls.length === before,
+        `ALLOW_PER_CALL_DISCLOSURE_OFF=${JSON.stringify(value)} does not honor discloseAi false`
+      );
+    }
+    delete process.env.ALLOW_PER_CALL_DISCLOSURE_OFF;
     const refusedRecordBefore = calls.length;
     const refusedRecord = await request(port, 'POST', '/call', {
       to: UNMAPPED,
@@ -911,6 +948,106 @@ async function main() {
     delete process.env.CONTACT_FULL_NAME;
     delete process.env.SUPPORT_ANNOUNCE_CONTACT_NAME;
 
+    const contactName = 'Example Person';
+    const contactMobile = '+15555550198';
+    process.env.CONTACT_FULL_NAME = contactName;
+    process.env.CONTACT_MOBILE = contactMobile;
+    delete process.env.SUPPORT_ANNOUNCE_CONTACT_NAME;
+
+    function grokCapture(session) {
+      const sent = [];
+      session.grokWs = {
+        readyState: 1,
+        send(payload) {
+          sent.push(JSON.parse(payload));
+        },
+      };
+      return sent;
+    }
+    function modelText(sent) {
+      return sent
+        .map((obj) => {
+          if (obj && obj.response && obj.response.instructions) return obj.response.instructions;
+          if (obj && obj.session && obj.session.instructions) return obj.session.instructions;
+          return '';
+        })
+        .join('\n');
+    }
+    async function assertContactHidden(session, sent, label) {
+      const voice = await request(port, 'POST', '/voice', { callSid: session.callSid, voice: 'Eve' });
+      const blob = `${session.instructions}\n${modelText(sent)}`;
+      assert(
+        voice.status === 200 &&
+          !blob.includes(contactName) &&
+          !blob.includes(contactMobile) &&
+          !blob.includes('Known contact'),
+        label
+      );
+    }
+
+    const supportQuiet = createSession({
+      callSid: 'support-voice-off',
+      goal: 'Check a store hour',
+      style: 'support',
+    });
+    const supportQuietSent = grokCapture(supportQuiet);
+    await assertContactHidden(
+      supportQuiet,
+      supportQuietSent,
+      'support with the announce flag off does not send the contact name or mobile, including after POST /voice'
+    );
+    const supportCallee = createSession({
+      callSid: 'support-callee-off',
+      goal: 'Check a store hour',
+      style: 'support',
+    });
+    const supportCalleeSent = grokCapture(supportCallee);
+    handleGrokEvent(supportCallee, {
+      type: 'conversation.item.input_audio_transcription.completed',
+      transcript: 'please switch to Eve',
+    });
+    const calleeBlob = `${supportCallee.instructions}\n${modelText(supportCalleeSent)}`;
+    assert(
+      !calleeBlob.includes(contactName) &&
+        !calleeBlob.includes(contactMobile) &&
+        !calleeBlob.includes('Known contact'),
+      'a callee voice switch on support does not send the contact name or mobile when the flag is off'
+    );
+
+    process.env.SUPPORT_ANNOUNCE_CONTACT_NAME = '1';
+    const supportTold = createSession({
+      callSid: 'support-voice-on',
+      goal: 'Check a store hour',
+      style: 'support',
+    });
+    const supportToldSent = grokCapture(supportTold);
+    const toldVoice = await request(port, 'POST', '/voice', { callSid: supportTold.callSid, voice: 'Rex' });
+    const toldBlob = `${supportTold.instructions}\n${modelText(supportToldSent)}`;
+    assert(
+      toldVoice.status === 200 &&
+        toldBlob.includes(contactName) &&
+        toldBlob.includes(contactMobile),
+      'support with SUPPORT_ANNOUNCE_CONTACT_NAME exactly 1 may send the contact name and mobile after a voice switch'
+    );
+
+    delete process.env.SUPPORT_ANNOUNCE_CONTACT_NAME;
+    const restaurantVoice = createSession({
+      callSid: 'restaurant-voice',
+      goal: 'Book a table',
+      style: 'restaurant-book',
+    });
+    const restaurantSent = grokCapture(restaurantVoice);
+    const restaurantSwitch = await request(port, 'POST', '/voice', { callSid: restaurantVoice.callSid, voice: 'Sal' });
+    const restaurantBlob = `${restaurantVoice.instructions}\n${modelText(restaurantSent)}`;
+    assert(
+      restaurantSwitch.status === 200 &&
+        restaurantBlob.includes(contactName) &&
+        restaurantBlob.includes(contactMobile),
+      'restaurant-book still sends the contact name and mobile when the support flag is off'
+    );
+    delete process.env.CONTACT_FULL_NAME;
+    delete process.env.CONTACT_MOBILE;
+
     const quiet = createSession({
       callSid: 'nudge-quiet',
       goal: 'Confirm a dinner time',
@@ -1041,6 +1178,7 @@ async function main() {
     UNMAPPED,
     SECRET_IN_BAD_JSON,
     INVALID_AUTO_KEY,
+    '+15555550198',
     ...FILE_NUMBERS,
     '555555',
     '555 555',

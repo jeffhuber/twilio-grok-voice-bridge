@@ -328,11 +328,13 @@ function switchSessionVoice(session, requested, { announce = true, reason = 'api
 
   if (announce) {
     const label = voiceDisplayName(next);
-    const contactHint = contactCoachHint();
+    const allowContact = sessionMayReceiveContact(session);
+    const contactHint = allowContact ? contactCoachHint() : '';
+    const detailSource = allowContact ? 'the goal/context/contact rules' : 'the goal or context';
     sendGrok(session, {
       type: 'response.create',
       response: {
-        instructions: `The phone voice just switched to ${label}. Continue the SAME call naturally in this voice. Do NOT say you will grab/get/switch to someone, do not say "one sec," do not explain technology. At most a tiny "sure." If they just asked for name, time, seating, or phone, answer with REAL details only from the goal/context/contact rules — never invent names or phone numbers.${contactHint}`,
+        instructions: `The phone voice just switched to ${label}. Continue the SAME call naturally in this voice. Do NOT say you will grab/get/switch to someone, do not say "one sec," do not explain technology. At most a tiny "sure." If they just asked for name, time, seating, or phone, answer with REAL details only from ${detailSource}. Never invent names or phone numbers.${contactHint}`,
       },
     });
   }
@@ -553,6 +555,10 @@ function readStylePackFile(dirReal, fileName) {
     console.warn(`[warn] style pack skipped file=${label} reason=not a regular file`);
     return;
   }
+  if (st.nlink > 1) {
+    console.warn(`[warn] style pack skipped file=${label} reason=hard link`);
+    return;
+  }
   let raw;
   try {
     raw = fs.readFileSync(targetReal, 'utf8');
@@ -701,6 +707,11 @@ function formatMobileSpoken(mobile) {
   return digits.split('').join(' ');
 }
 
+function sessionMayReceiveContact(session) {
+  if (session && normalizeStyle(session.style) === 'restaurant-book') return true;
+  return process.env.SUPPORT_ANNOUNCE_CONTACT_NAME === '1';
+}
+
 function contactCoachHint() {
   const c = getContact();
   if (c.fullName || c.mobile) {
@@ -709,7 +720,7 @@ function contactCoachHint() {
     if (c.mobile) bits.push(`mobile ${c.mobile}`);
     return ` Known contact: ${bits.join('; ')}.`;
   }
-  return ' If contact details are missing from env/goal/context, ask the operator via [[HANGUP_REQUESTED]] or refuse inventing numbers — do not invent.';
+  return ' If contact details are missing from env/goal/context, ask the operator via [[HANGUP_REQUESTED]] or refuse inventing numbers. Do not invent.';
 }
 
 /** English address terms banned on all calls. */

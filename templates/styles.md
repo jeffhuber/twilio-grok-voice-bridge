@@ -10,7 +10,7 @@ Professional errand / customer-support pacing.
 
 - The first line stays `You are placing a phone call to handle an errand or customer-support matter.` unless `SUPPORT_ANNOUNCE_CONTACT_NAME` is exactly `1`.
 - When that flag is exactly `1` and `CONTACT_FULL_NAME` is set, the first line is: `You are placing a phone call on behalf of <CONTACT_FULL_NAME> to handle an errand or customer-support matter.`
-- `CONTACT_FULL_NAME` used for restaurant booking does not change support calls while the flag is off.
+- `CONTACT_FULL_NAME` and `CONTACT_MOBILE` used for restaurant booking are not sent to the model on a support call, including after a voice change, while the flag is off.
 - Wait through IVR and hold; do not babble over hold music.
 - Concise, clear, lightly energetic delivery.
 - Soft-continue off unless you set `softContinue: true`.
