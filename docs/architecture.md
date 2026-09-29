@@ -77,24 +77,26 @@ timer (`BARGE_IN_CONFIRM_MS`, default ~280ms). If user speech is still active af
 
 ## Soft-continue
 
-When enabled (`softContinue: true` on `/call`):
+When the effective `softContinue` value is true:
 
 1. On Grok `response.done`, bridge sends a Twilio `mark`.
 2. When Twilio reports that mark (playback drained), schedule a nudge after `SOFT_CONTINUE_MS`.
-3. Nudge injects a generic `[bridge-continue]` user item + `response.create` so the agent keeps
-   talking if the callee is quiet.
+3. Nudge injects a `[bridge-continue]` user item plus `response.create` so the agent keeps
+   talking if the callee is quiet. A private pack can replace that nudge text with `softContinuePrompt`.
+   If that prompt does not contain `[[HANGUP_REQUESTED]]`, the generic hangup-token lines are appended.
 
-Disabled by default for `support` / `restaurant-book` unless requested.
+The effective value is the JSON boolean on `/call` when one is sent. Otherwise it is the pack's `softContinue` boolean when the selected style is a pack that sets one. Otherwise it is false. Built-in styles stay off unless the request sets `true`. VAD uses the soft thresholds only when the effective value is true.
 
 ## Styles
 
 | Style | Coaching |
 |-------|----------|
-| `support` (default) | Generic errand/CS pacing |
+| `support` (default) | Generic errand/CS pacing. The contact name is announced only when `SUPPORT_ANNOUNCE_CONTACT_NAME` is exactly `1`. |
 | `restaurant-book` | Sample reservation coaching using `CONTACT_FULL_NAME` / `CONTACT_MOBILE` |
-| `custom` | Goal + context only |
+| `custom` | Goal + context only. Also the fallback for a style name that is still unknown. |
+| private pack | Loaded from `STYLE_PACKS_DIR`. See templates/styles.md. |
 
-There is **no** auto-style-by-destination-number.
+`STYLE_AUTO_SELECT` maps a destination number to a style when `POST /call` omits `style`. After whitespace is stripped, the key must be E.164 (`+` and 2 to 15 digits). An explicit `style` wins. `GET /health` is unauthenticated: `styles` lists only `support`, `restaurant-book`, and `custom`, and `stylePackCount` is the number of loaded packs. Pack names, aliases, and destination numbers are not included. `styleAutoSelectCount` is the number of kept map entries. A style-pack symlink is loaded only when the resolved file is inside the pack directory. Pack text is sent to xAI as call instructions and is not written to logs.
 
 ## Voice resolution
 

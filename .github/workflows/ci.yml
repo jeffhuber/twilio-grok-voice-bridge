@@ -88,6 +88,12 @@ jobs:
         env:
           BRIDGE_API_KEY: ci-test-key
         run: node test/test-opener-on-connect.js
+
+      - name: Run style pack tests
+        env:
+          BRIDGE_API_KEY: ci-test-key
+          PUBLIC_HOST: bridge.example.com
+        run: node test/test-style-packs.js
       
       - name: Run delivery tag stripping test
         env:
